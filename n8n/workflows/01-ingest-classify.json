@@ -151,7 +151,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT swinv_apply_rules($1::int, $2::uuid) AS result",
+        "query": "SELECT swinv_apply_rules($1::int, $2::uuid, true) AS result",
         "options": {
           "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.host_id, $('БД: хост + запуск').first().json.run_id ] }}"
         }

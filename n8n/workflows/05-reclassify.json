@@ -90,6 +90,7 @@
       "parameters": {
         "httpMethod": "GET",
         "path": "inventory/api/consistency",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -101,7 +102,13 @@
         0,
         520
       ],
-      "webhookId": "swinv-inventory-consistency-01"
+      "webhookId": "swinv-inventory-consistency-01",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "swinvWebhookTok",
+          "name": "SWInv Collector Token (header X-Inventory-Token)"
+        }
+      }
     },
     {
       "parameters": {
@@ -150,7 +157,7 @@
     },
     {
       "parameters": {
-        "content": "## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency — порівняння старих і нових рішень AI: частка однакових продуктів і категорій.",
+        "content": "## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency (X-Inventory-Token) — порівняння старих і нових рішень AI: відсотки лише по повторних рішеннях моделі, окремо — скільки закрилось словником/правилами без AI.",
         "height": 200,
         "width": 900,
         "color": 5

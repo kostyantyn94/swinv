@@ -437,8 +437,10 @@ END $$;
 -- 5.4 Крок 2: правила (dict_rules) для нерозв'язаних відбитків.
 --     p_include_mapped = true (перекласифікація): правила також перезаписують рішення з нижчим пріоритетом (ai, exact),
 --     але ніколи — human/seed (захист у ON CONFLICT). p_host_id = NULL — увесь парк.
+--     p_rule_id — застосувати лише одне правило (наприклад, щойно створене з форми), а не весь набір.
 DROP FUNCTION IF EXISTS swinv_apply_rules(int, uuid);
-CREATE OR REPLACE FUNCTION swinv_apply_rules(p_host_id int, p_run_id uuid, p_include_mapped boolean DEFAULT false)
+DROP FUNCTION IF EXISTS swinv_apply_rules(int, uuid, boolean);
+CREATE OR REPLACE FUNCTION swinv_apply_rules(p_host_id int, p_run_id uuid, p_include_mapped boolean DEFAULT false, p_rule_id int DEFAULT NULL)
 RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE v_count int; v_rules jsonb;
 BEGIN
@@ -464,7 +466,7 @@ BEGIN
                                               AND m.priority < swinv_priority('rule'))))
     ORDER BY p.fingerprint, p.id
   ) u
-  JOIN dict_rules r ON r.enabled AND (
+  JOIN dict_rules r ON r.enabled AND (p_rule_id IS NULL OR r.id = p_rule_id) AND (
        CASE r.field WHEN 'name' THEN u.name WHEN 'name_normalized' THEN coalesce(u.name_normalized,'')
                     WHEN 'publisher' THEN coalesce(u.publisher,'') WHEN 'source_key' THEN u.source_key
                     WHEN 'winget_id' THEN coalesce(u.winget_id,'') WHEN 'source' THEN u.source END) ~* r.pattern
@@ -668,8 +670,8 @@ BEGIN
     VALUES ('Рішення людини: ' || left(q.sample_name, 60), 'name', v_pattern, trim(p_software_name), nullif(trim(p_vendor_name),''),
             p_category_code, coalesce(p_is_component,false), 500, 'human')
     RETURNING id INTO v_rule_id;
-    -- нове правило одразу застосовується до всього парку: перекриває рішення ai/exact, не чіпає human/seed
-    v_propagated := swinv_apply_rules(NULL, NULL, true);
+    -- лише нове правило одразу застосовується до всього парку: перекриває рішення ai/exact, не чіпає human/seed
+    v_propagated := swinv_apply_rules(NULL, NULL, true, v_rule_id);
     PERFORM swinv_set_actor('human:' || coalesce(p_actor,'reviewer'), q.run_id);
   END IF;
 
@@ -725,16 +727,22 @@ cmp AS (
   LEFT JOIN dict_software ns ON ns.id = m.software_id)
 SELECT jsonb_build_object(
   'reset_decisions', (SELECT count(*) FROM cmp),
-  'reclassified', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL),
-  'same_product', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND lower(new_software) = lower(old_software)),
-  'same_category', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND new_category = old_category),
-  'same_both', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND lower(new_software) = lower(old_software) AND new_category = old_category),
-  'category_pct', (SELECT round(100.0 * count(*) FILTER (WHERE new_category = old_category) / greatest(count(*) FILTER (WHERE new_software IS NOT NULL), 1), 1) FROM cmp),
-  'product_pct', (SELECT round(100.0 * count(*) FILTER (WHERE lower(new_software) = lower(old_software)) / greatest(count(*) FILTER (WHERE new_software IS NOT NULL), 1), 1) FROM cmp),
+  'reclassified', (SELECT count(*) FILTER (WHERE new_software IS NOT NULL) FROM cmp),
+  'pending', (SELECT count(*) FILTER (WHERE new_software IS NULL) FROM cmp),
+  -- як закрились скинуті відбитки після повторного збору: знову AI, чи exact/rule/human без моделі
+  'by_new_match_type', (SELECT coalesce(jsonb_agg(jsonb_build_object('match_type', mt, 'count', n) ORDER BY n DESC), '[]'::jsonb) FROM (
+      SELECT coalesce(new_match_type, 'pending') mt, count(*) n FROM cmp GROUP BY 1) x),
+  -- відсотки ЛИШЕ по рішеннях, які модель прийняла повторно (new_match_type = 'ai'); кеш продукту/правила сюди не входять
+  'ai_redecided', (SELECT count(*) FROM cmp WHERE new_match_type = 'ai'),
+  'ai_same_product', (SELECT count(*) FROM cmp WHERE new_match_type = 'ai' AND lower(new_software) = lower(old_software)),
+  'ai_same_category', (SELECT count(*) FROM cmp WHERE new_match_type = 'ai' AND new_category = old_category),
+  'ai_same_both', (SELECT count(*) FROM cmp WHERE new_match_type = 'ai' AND lower(new_software) = lower(old_software) AND new_category = old_category),
+  'ai_category_pct', (SELECT round(100.0 * count(*) FILTER (WHERE new_category = old_category) / greatest(count(*), 1), 1) FROM cmp WHERE new_match_type = 'ai'),
+  'ai_product_pct', (SELECT round(100.0 * count(*) FILTER (WHERE lower(new_software) = lower(old_software)) / greatest(count(*), 1), 1) FROM cmp WHERE new_match_type = 'ai'),
   'differences', (SELECT coalesce(jsonb_agg(to_jsonb(c)), '[]'::jsonb) FROM (
       SELECT fingerprint, old_software, old_category, new_software, new_category, new_match_type, new_confidence
       FROM cmp WHERE new_software IS NOT NULL AND (lower(new_software) <> lower(old_software) OR new_category <> old_category)
-      ORDER BY fingerprint LIMIT 40) c))
+      ORDER BY new_match_type, fingerprint LIMIT 40) c))
 $$;
 
 -- ---------------------------------------------------------------------

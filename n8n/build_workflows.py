@@ -300,7 +300,8 @@ def build_ingest():
     # --- lane 2: детерміноване зіставлення
     n_exact = pg('БД: крок 1 — точні збіги (довідник)', "SELECT swinv_match_exact($1::int, $2::uuid) AS result",
                  "={{ [ $('БД: хост + запуск').first().json.host_id, $('БД: хост + запуск').first().json.run_id ] }}", 1440, Y)
-    n_rules = pg('БД: крок 2 — правила (dict_rules)', "SELECT swinv_apply_rules($1::int, $2::uuid) AS result",
+    # include_mapped = true: правила в кожному запуску старші за ai/exact (human/seed захищені пріоритетом)
+    n_rules = pg('БД: крок 2 — правила (dict_rules)', "SELECT swinv_apply_rules($1::int, $2::uuid, true) AS result",
                  "={{ [ $('БД: хост + запуск').first().json.host_id, $('БД: хост + запуск').first().json.run_id ] }}", 1680, Y)
     n_cats = pg('Довідник категорій',
                 "SELECT jsonb_agg(jsonb_build_object('code', code, 'name_uk', name_uk, 'name_en', name_en, 'description', description, 'policy', policy) ORDER BY sort_order) AS categories FROM dict_category",
@@ -572,14 +573,14 @@ return [{ json: { host_id: hostId, reset_ai: b.reset_ai === true || String(b.res
                   {"respondWith": "json", "responseBody": "={{ JSON.stringify($json.result) }}",
                    "options": {"responseHeaders": {"entries": [{"name": "Content-Type", "value": "application/json; charset=utf-8"}]}}}, 740, Y)
     n_wh2 = node('Webhook: GET /inventory/api/consistency', 'n8n-nodes-base.webhook', 2.1,
-                 {"httpMethod": "GET", "path": "inventory/api/consistency", "responseMode": "responseNode", "options": {}},
-                 0, Y + 220, webhookId="swinv-inventory-consistency-01")
+                 {"httpMethod": "GET", "path": "inventory/api/consistency", "authentication": "headerAuth", "responseMode": "responseNode", "options": {}},
+                 0, Y + 220, webhookId="swinv-inventory-consistency-01", credentials=CRED_HEADER)
     n_db2 = pg('БД: звіт стабільності AI', "SELECT swinv_ai_consistency_report() AS r", None, 480, Y + 220)
     n_resp2 = node('JSON-відповідь (звіт)', 'n8n-nodes-base.respondToWebhook', 1.5,
                    {"respondWith": "json", "responseBody": "={{ JSON.stringify($json.r) }}",
                     "options": {"responseHeaders": {"entries": [{"name": "Content-Type", "value": "application/json; charset=utf-8"}]}}}, 740, Y + 220)
     nodes += [n_wh, n_params, n_db, n_resp, n_wh2, n_db2, n_resp2]
-    nodes.append(sticky("## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency — порівняння старих і нових рішень AI: частка однакових продуктів і категорій.", -40, Y - 230, 900, 200, 5))
+    nodes.append(sticky("## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency (X-Inventory-Token) — порівняння старих і нових рішень AI: відсотки лише по повторних рішеннях моделі, окремо — скільки закрилось словником/правилами без AI.", -40, Y - 230, 900, 200, 5))
     c = conns
     connect(c, n_wh['name'], n_params['name'])
     connect(c, n_params['name'], n_db['name'])
