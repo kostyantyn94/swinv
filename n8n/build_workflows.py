@@ -149,6 +149,7 @@ const system = [
   '(registry Uninstall entries, MSIX/Appx packages, winget rows, npm/pip packages, VS Code extensions).',
   'For EACH input package return one object with fields:',
   '- id: the same integer id as in the input (echo back; every input id exactly once)',
+  '- name: the input package name copied verbatim (used to verify that id and answer were not mixed up)',
   '- software: canonical PRODUCT name the package belongs to. No version numbers, no architecture (x64/x86), no locale suffixes.',
   '  Keep a year only when it is part of the product name (e.g. "Microsoft SQL Server 2025"). Sub-components map to the PARENT product',
   '  (e.g. "SQL Server 2025 Database Engine Shared" -> "Microsoft SQL Server 2025"; "ENE_MousePad_HAL" -> "ENE Device HAL Drivers").',
@@ -204,11 +205,22 @@ if (!Array.isArray(items)) {
 }
 const ACCEPT = 0.80, ACCEPT_REVIEW = 0.60;
 const byId = new Map(batch.items.map(it => [it.id, it]));
-const seen = new Set(); const results = []; const stats = { accept: 0, accept_review: 0, review: 0, invalid: 0 };
+const seen = new Set(); const results = []; const stats = { accept: 0, accept_review: 0, review: 0, invalid: 0, name_mismatch: 0 };
+const simplify = (s) => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '');
 for (const r of items) {
   const id = Number(r.id); const src = byId.get(id);
   if (!src || seen.has(id)) { stats.invalid++; continue; }
   seen.add(id);
+  // echo-back of the package name: protects against id/answer shuffles inside a batch
+  const a = simplify(r.name), b = simplify(src.name);
+  if (a && b && !(a.includes(b) || b.includes(a))) {
+    stats.name_mismatch++; stats.review++;
+    results.push({ fingerprint: src.fingerprint, decision: 'review', software_name: String(r.software || '').trim().slice(0, 200) || null,
+      vendor_name: String(r.vendor || '').trim().slice(0, 120) || null, category_code: null, is_component: !!r.is_component, confidence: 0,
+      reason: `AI повернув відповідь для іншого пакета («${String(r.name || '').slice(0, 60)}»)`, review_reason: 'invalid_output',
+      sample_name: src.name, sample_publisher: src.publisher || null, sample_source: src.source, sample_version: src.version || null });
+    continue;
+  }
   let cat = String(r.category || '').toUpperCase().trim();
   let conf = Number(r.confidence); if (!isFinite(conf)) conf = 0; conf = Math.max(0, Math.min(1, conf));
   const software = String(r.software || '').trim().slice(0, 200);
@@ -247,6 +259,7 @@ OUTPUT_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "integer"},
+                    "name": {"type": "string"},
                     "software": {"type": "string"},
                     "vendor": {"type": "string"},
                     "category": {"type": "string", "enum": CATEGORY_CODES},
@@ -254,7 +267,7 @@ OUTPUT_SCHEMA = {
                     "confidence": {"type": "number"},
                     "reason": {"type": "string"}
                 },
-                "required": ["id", "software", "vendor", "category", "is_component", "confidence"]
+                "required": ["id", "name", "software", "vendor", "category", "is_component", "confidence"]
             }
         }
     },
@@ -533,6 +546,50 @@ def build_dashboard():
 
 
 # ---------------------------------------------------------------------------
+# Workflow 5: Reclassification + AI consistency report
+# ---------------------------------------------------------------------------
+WF_RECLASS_ID = 'swinvReclass0001'
+
+
+def build_reclassify():
+    _node_counter[0] = 0
+    nodes = []
+    conns = {}
+    Y = 300
+    n_wh = node('Webhook: POST /inventory/reclassify', 'n8n-nodes-base.webhook', 2.1,
+                {"httpMethod": "POST", "path": "inventory/reclassify", "authentication": "headerAuth", "responseMode": "responseNode", "options": {}},
+                0, Y, webhookId="swinv-inventory-reclassify-01", credentials=CRED_HEADER)
+    n_params = code('Параметри перекласифікації', r"""
+// body: { host_id?: number, reset_ai?: boolean, prompt_version?: string }
+const b = ($input.first().json.body) || {};
+const hostId = (b.host_id !== undefined && b.host_id !== null && /^\d+$/.test(String(b.host_id))) ? Number(b.host_id) : null;
+return [{ json: { host_id: hostId, reset_ai: b.reset_ai === true || String(b.reset_ai) === 'true', prompt_version: b.prompt_version ? String(b.prompt_version) : null } }];
+""", 240, Y)
+    n_db = pg('БД: перекласифікація (правила заднім числом, скидання AI)',
+              "SELECT swinv_reclassify($1::int, $2::boolean, $3::text) AS result",
+              "={{ [ $json.host_id, $json.reset_ai, $json.prompt_version ] }}", 480, Y)
+    n_resp = node('JSON-відповідь', 'n8n-nodes-base.respondToWebhook', 1.5,
+                  {"respondWith": "json", "responseBody": "={{ JSON.stringify($json.result) }}",
+                   "options": {"responseHeaders": {"entries": [{"name": "Content-Type", "value": "application/json; charset=utf-8"}]}}}, 740, Y)
+    n_wh2 = node('Webhook: GET /inventory/api/consistency', 'n8n-nodes-base.webhook', 2.1,
+                 {"httpMethod": "GET", "path": "inventory/api/consistency", "responseMode": "responseNode", "options": {}},
+                 0, Y + 220, webhookId="swinv-inventory-consistency-01")
+    n_db2 = pg('БД: звіт стабільності AI', "SELECT swinv_ai_consistency_report() AS r", None, 480, Y + 220)
+    n_resp2 = node('JSON-відповідь (звіт)', 'n8n-nodes-base.respondToWebhook', 1.5,
+                   {"respondWith": "json", "responseBody": "={{ JSON.stringify($json.r) }}",
+                    "options": {"responseHeaders": {"entries": [{"name": "Content-Type", "value": "application/json; charset=utf-8"}]}}}, 740, Y + 220)
+    nodes += [n_wh, n_params, n_db, n_resp, n_wh2, n_db2, n_resp2]
+    nodes.append(sticky("## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency — порівняння старих і нових рішень AI: частка однакових продуктів і категорій.", -40, Y - 230, 900, 200, 5))
+    c = conns
+    connect(c, n_wh['name'], n_params['name'])
+    connect(c, n_params['name'], n_db['name'])
+    connect(c, n_db['name'], n_resp['name'])
+    connect(c, n_wh2['name'], n_db2['name'])
+    connect(c, n_db2['name'], n_resp2['name'])
+    return workflow(WF_RECLASS_ID, 'SWInv · 5. Перекласифікація та стабільність AI', nodes, conns, settings={"errorWorkflow": WF_ERROR_ID})
+
+
+# ---------------------------------------------------------------------------
 # Workflow 4: Error trigger -> audit_log
 # ---------------------------------------------------------------------------
 
@@ -553,7 +610,8 @@ def build_errors():
 
 if __name__ == '__main__':
     wfs = [('01-ingest-classify.json', build_ingest()), ('02-review-form.json', build_review()),
-           ('03-dashboard.json', build_dashboard()), ('04-error-handler.json', build_errors())]
+           ('03-dashboard.json', build_dashboard()), ('04-error-handler.json', build_errors()),
+           ('05-reclassify.json', build_reclassify())]
     for fn, wf in wfs:
         p = os.path.join(OUT, fn)
         with io.open(p, 'w', encoding='utf-8') as f:

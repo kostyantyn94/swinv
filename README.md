@@ -339,6 +339,8 @@ ON CONFLICT (fingerprint) DO UPDATE SET … WHERE EXCLUDED.priority >= dict_pack
 
 **Аудит.** Тригер `trg_audit_<table>` (`swinv_audit_trigger`) на всіх п'яти `dict_*` таблицях пише `old_row`/`new_row`/`actor`/`run_id` у `audit_log`; актор виставляється на час транзакції через `swinv_set_actor()` (`collector`, `exact`, `rule`, `ai:<модель>`, `human:<хто>`, `seed`). Технічні зміни (`updated_at`, `last_seen`, `hit_count`, `last_hit_at`) не логуються, тому «нічого не змінилось» дає рівно 0 рядків. `inventory_runs.dict_changes` = кількість рядків аудиту з цим `run_id`.
 
+**Перекласифікація накопичених рішень.** Правила у звичайному запуску застосовуються лише до нових відбитків, тому є окремий механізм для «заднім числом»: `swinv_reclassify(host_id, reset_ai, prompt_version)` (воркфлоу 5, `POST /webhook/inventory/reclassify`). Він застосовує поточні правила до всіх відбитків парку і перекриває рішення `ai`/`exact`, але ніколи `human`/`seed` — той самий захист пріоритетів. Рішення людини з форми поширюється на парк автоматично: створене правило одразу проганяється по всіх хостах. З `reset_ai` рішення AI (усі або зі старим `prompt_version`) видаляються з фіксацією `old_row` в аудиті, і наступний збір запитує модель повторно; `GET /webhook/inventory/api/consistency` порівнює старі й нові відповіді.
+
 **Черга перевірки.** Один відкритий запис на відбиток (частковий унікальний індекс). Відбитки, що чекають на людину (`low_confidence`, `unknown_category`, `manual`), до AI повторно не надсилаються; технічні збої (`ai_unavailable`, `invalid_output`) — повторюються при наступному запуску і закриваються автоматично з `resolved_by = 'ai-retry'`.
 
 ---
@@ -361,7 +363,8 @@ ON CONFLICT (fingerprint) DO UPDATE SET … WHERE EXCLUDED.priority >= dict_pack
 | 12 | **Ідемпотентність прийому**: `UNIQUE (host_id, source, source_key)`, повторний `run_id` того самого файлу → новий запуск (`client_run_id` зберігає оригінал), зникле → `present = false`, а не `DELETE` | `swinv_ingest_packages`, `swinv_upsert_host_run` | Повторний POST того самого файлу → `0 / 0 / 0` |
 | 13 | **Збій AI не ламає запуск**: retry 2× (3 с), потім error-вихід ноди → батч у чергу з `ai_unavailable`; статус запуску `done`; наступний запуск повторить лише технічні збої | `retryOnFail`, `onError: continueErrorOutput`, `swinv_ai_failed`, `swinv_unresolved` | Зупинити `swinv-ollama` → запуск завершується, черга наповнюється; підняти → наступний запуск закриває їх (`resolved_by = ai-retry`) |
 | 14 | **Людина в контурі**: рішення `human = 400` + опційне правило точного збігу `priority 500` — AI більше не питають | `swinv_apply_human_decision`, воркфлоу 2 | Форма → «Збережено ✔ … Створено правило #N»; рядок у «Правила зіставлення» з `origin human` |
-| 15 | **Версіонування рішень**: `norm_version`, `prompt_version`, `model`, `confidence`, `evidence` зберігаються поруч із кожним рішенням | `dict_package_map`, `dict_software` | Можна перекласифікувати лише рішення `ai` зі старим `prompt_version`, не чіпаючи правила й людей |
+| 15 | **Версіонування й перекласифікація**: `norm_version`, `prompt_version`, `model`, `confidence`, `evidence` поруч із кожним рішенням; `swinv_reclassify` застосовує нові правила заднім числом і може скинути рішення `ai` зі старим `prompt_version`, не чіпаючи правила й людей | `dict_package_map`, `swinv_reclassify`, воркфлоу 5 | Додати правило → `POST /inventory/reclassify` → рішення AI перекрито, рішення людини лишилось; звіт `/inventory/api/consistency` |
+| 17 | **Echo-back назви пакета**: модель повертає `id` і `name`; якщо назва не збігається з вхідною (переплутані рядки в батчі), відповідь іде в чергу, а не в довідник | `JS_VALIDATE_AI` | Причина «некоректна відповідь AI» у черзі перевірки |
 | 16 | **Помилки воркфлоу теж у журналі** | воркфлоу 4 `Помилка будь-якого воркфлоу SWInv` → `audit_log` (`table_name = n8n_workflow`) | Картка «Журнал аудиту» |
 
 ---
@@ -379,6 +382,7 @@ ON CONFLICT (fingerprint) DO UPDATE SET … WHERE EXCLUDED.priority >= dict_pack
 | Тривалість першого запуску | 66 с (≈ 9 с на батч на RTX 4090) |
 | Записів аудиту за перший запуск | 788 |
 | Згортання пакетів у продукти | 562 пакети → ≈ 298 продуктів на хості |
+| Стабільність AI без довідника | скинуто 68 рішень AI і запитано модель повторно (`reset_ai`): категорія збіглась у 95,6 %, назва продукту у 82,4 % (розбіжності — варіанти написання на кшталт «Gothic 2» / «Gothic II»); саме тому канон назви фіксує довідник, а не модель |
 | **Другий запуск (той самий ПК)** | added 0 / changed 0 / removed 0, `known_before 393`, **`ai_calls 0`, `dict_changes 0`**, ≈ 0,3 с — рядок зелений |
 
 Приклади згортання:

@@ -1,0 +1,235 @@
+{
+  "id": "swinvReclass0001",
+  "name": "SWInv · 5. Перекласифікація та стабільність AI",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inventory/reclassify",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n001",
+      "name": "Webhook: POST /inventory/reclassify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "swinv-inventory-reclassify-01",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "swinvWebhookTok",
+          "name": "SWInv Collector Token (header X-Inventory-Token)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// body: { host_id?: number, reset_ai?: boolean, prompt_version?: string }\nconst b = ($input.first().json.body) || {};\nconst hostId = (b.host_id !== undefined && b.host_id !== null && /^\\d+$/.test(String(b.host_id))) ? Number(b.host_id) : null;\nreturn [{ json: { host_id: hostId, reset_ai: b.reset_ai === true || String(b.reset_ai) === 'true', prompt_version: b.prompt_version ? String(b.prompt_version) : null } }];\n"
+      },
+      "id": "n002",
+      "name": "Параметри перекласифікації",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_reclassify($1::int, $2::boolean, $3::text) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $json.host_id, $json.reset_ai, $json.prompt_version ] }}"
+        }
+      },
+      "id": "n003",
+      "name": "БД: перекласифікація (правила заднім числом, скидання AI)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        480,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.result) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n004",
+      "name": "JSON-відповідь",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "inventory/api/consistency",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n005",
+      "name": "Webhook: GET /inventory/api/consistency",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        520
+      ],
+      "webhookId": "swinv-inventory-consistency-01"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_ai_consistency_report() AS r",
+        "options": {}
+      },
+      "id": "n006",
+      "name": "БД: звіт стабільності AI",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        480,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.r) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n007",
+      "name": "JSON-відповідь (звіт)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        740,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Перекласифікація та стабільність AI\nPOST /webhook/inventory/reclassify (X-Inventory-Token), body `{\"host_id\": 1?, \"reset_ai\": false, \"prompt_version\": \"p1\"?}`:\n1) поточні правила застосовуються до ВСІХ відбитків парку заднім числом — перекривають рішення ai/exact, ніколи human/seed;\n2) за `reset_ai` рішення AI (усі або зі старим prompt_version) видаляються (old_row лишається в audit_log) — наступний збір запитає модель повторно.\nGET /webhook/inventory/api/consistency — порівняння старих і нових рішень AI: частка однакових продуктів і категорій.",
+        "height": 200,
+        "width": 900,
+        "color": 5
+      },
+      "id": "n009",
+      "name": "Note n008",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        70
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: POST /inventory/reclassify": {
+      "main": [
+        [
+          {
+            "node": "Параметри перекласифікації",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Параметри перекласифікації": {
+      "main": [
+        [
+          {
+            "node": "БД: перекласифікація (правила заднім числом, скидання AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: перекласифікація (правила заднім числом, скидання AI)": {
+      "main": [
+        [
+          {
+            "node": "JSON-відповідь",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: GET /inventory/api/consistency": {
+      "main": [
+        [
+          {
+            "node": "БД: звіт стабільності AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: звіт стабільності AI": {
+      "main": [
+        [
+          {
+            "node": "JSON-відповідь (звіт)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "swinvErrors00001"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

@@ -398,7 +398,7 @@ END $$;
 -- 5.3 Крок 1: точні збіги — відбиток уже в довіднику (touch last_seen) або winget id відомого продукту
 CREATE OR REPLACE FUNCTION swinv_match_exact(p_host_id int, p_run_id uuid)
 RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE v_known int; v_exact int;
+DECLARE v_known int; v_exact int; v_exact2 int;
 BEGIN
   PERFORM swinv_set_actor('exact', p_run_id);
 
@@ -417,16 +417,33 @@ BEGIN
   ON CONFLICT (fingerprint) DO NOTHING;
   GET DIAGNOSTICS v_exact = ROW_COUNT;
 
+  -- той самий продукт уже відомий з іншого джерела/хоста (нормалізована назва + вендор = product_key)
+  INSERT INTO dict_package_map (fingerprint, software_id, match_type, priority, is_component, confidence, decided_by,
+                                sample_name, sample_publisher, sample_source, norm_version)
+  SELECT DISTINCT ON (p.fingerprint) p.fingerprint, s.id, 'exact', swinv_priority('exact'), false, 1.0, 'exact:product_key',
+         p.name, p.publisher, p.source, p.norm_version
+  FROM inventory_packages p JOIN dict_software s ON s.product_key = p.name_normalized || '|' || coalesce(p.publisher_normalized, '')
+  WHERE p.host_id = p_host_id AND p.present AND p.name_normalized IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM dict_package_map m WHERE m.fingerprint = p.fingerprint)
+  ORDER BY p.fingerprint, p.id
+  ON CONFLICT (fingerprint) DO NOTHING;
+  GET DIAGNOSTICS v_exact2 = ROW_COUNT;
+  v_exact := v_exact + v_exact2;
+
   UPDATE inventory_runs SET resolved_exact = v_exact WHERE run_id = p_run_id;
   RETURN jsonb_build_object('known_before', v_known, 'resolved_exact', v_exact);
 END $$;
 
--- 5.4 Крок 2: правила (dict_rules) для нерозв'язаних відбитків
-CREATE OR REPLACE FUNCTION swinv_apply_rules(p_host_id int, p_run_id uuid)
+-- 5.4 Крок 2: правила (dict_rules) для нерозв'язаних відбитків.
+--     p_include_mapped = true (перекласифікація): правила також перезаписують рішення з нижчим пріоритетом (ai, exact),
+--     але ніколи — human/seed (захист у ON CONFLICT). p_host_id = NULL — увесь парк.
+DROP FUNCTION IF EXISTS swinv_apply_rules(int, uuid);
+CREATE OR REPLACE FUNCTION swinv_apply_rules(p_host_id int, p_run_id uuid, p_include_mapped boolean DEFAULT false)
 RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE v_count int; v_rules jsonb;
 BEGIN
-  PERFORM swinv_set_actor('rule', p_run_id);
+  IF p_run_id IS NOT NULL THEN PERFORM swinv_set_actor('rule', p_run_id); END IF;
+  DROP TABLE IF EXISTS tmp_matched; DROP TABLE IF EXISTS tmp_applied;
 
   CREATE TEMP TABLE tmp_matched ON COMMIT DROP AS
   SELECT DISTINCT ON (u.fingerprint)
@@ -441,8 +458,10 @@ BEGIN
     SELECT DISTINCT ON (p.fingerprint) p.fingerprint, p.name, p.name_clean, p.name_normalized, p.publisher, p.publisher_normalized,
            p.source, p.source_key, p.winget_id, p.norm_version
     FROM inventory_packages p
-    WHERE p.host_id = p_host_id AND p.present
-      AND NOT EXISTS (SELECT 1 FROM dict_package_map m WHERE m.fingerprint = p.fingerprint)
+    WHERE (p_host_id IS NULL OR p.host_id = p_host_id) AND p.present
+      AND (NOT EXISTS (SELECT 1 FROM dict_package_map m WHERE m.fingerprint = p.fingerprint)
+           OR (p_include_mapped AND EXISTS (SELECT 1 FROM dict_package_map m WHERE m.fingerprint = p.fingerprint
+                                              AND m.priority < swinv_priority('rule'))))
     ORDER BY p.fingerprint, p.id
   ) u
   JOIN dict_rules r ON r.enabled AND (
@@ -462,25 +481,32 @@ BEGIN
   ORDER BY pk, m.rule_id
   ON CONFLICT (product_key) DO NOTHING;
 
-  -- зіставлення (пріоритет rule=300; захист від пониження)
-  INSERT INTO dict_package_map (fingerprint, software_id, match_type, priority, is_component, confidence, decided_by, rule_id,
-                                sample_name, sample_publisher, sample_source, norm_version, evidence)
-  SELECT m.fingerprint, s.id, 'rule', swinv_priority('rule'), m.is_component, 1.0, 'rule:' || m.rule_id, m.rule_id,
-         m.name, m.publisher, m.source, m.norm_version, jsonb_build_object('rule', m.rule_name)
-  FROM tmp_matched m JOIN dict_software s ON s.product_key = m.sw_key || '|' || coalesce(m.v_key,'')
-  ON CONFLICT (fingerprint) DO UPDATE SET
-     software_id = EXCLUDED.software_id, match_type = EXCLUDED.match_type, priority = EXCLUDED.priority,
-     is_component = EXCLUDED.is_component, decided_by = EXCLUDED.decided_by, rule_id = EXCLUDED.rule_id, evidence = EXCLUDED.evidence
-  WHERE EXCLUDED.priority >= dict_package_map.priority;
-  GET DIAGNOSTICS v_count = ROW_COUNT;
+  -- зіставлення (пріоритет rule=300; захист від пониження; повторне застосування того ж правила — не зміна)
+  CREATE TEMP TABLE tmp_applied (fingerprint text, rule_id int, rule_name text, was text) ON COMMIT DROP;
+  WITH ins AS (
+    INSERT INTO dict_package_map (fingerprint, software_id, match_type, priority, is_component, confidence, decided_by, rule_id,
+                                  sample_name, sample_publisher, sample_source, norm_version, evidence)
+    SELECT m.fingerprint, s.id, 'rule', swinv_priority('rule'), m.is_component, 1.0, 'rule:' || m.rule_id, m.rule_id,
+           m.name, m.publisher, m.source, m.norm_version, jsonb_build_object('rule', m.rule_name)
+    FROM tmp_matched m JOIN dict_software s ON s.product_key = m.sw_key || '|' || coalesce(m.v_key,'')
+    ON CONFLICT (fingerprint) DO UPDATE SET
+       software_id = EXCLUDED.software_id, match_type = EXCLUDED.match_type, priority = EXCLUDED.priority,
+       is_component = EXCLUDED.is_component, decided_by = EXCLUDED.decided_by, rule_id = EXCLUDED.rule_id, evidence = EXCLUDED.evidence,
+       confidence = 1.0, model = NULL, prompt_version = NULL
+    WHERE EXCLUDED.priority >= dict_package_map.priority
+      AND (dict_package_map.software_id IS DISTINCT FROM EXCLUDED.software_id
+           OR dict_package_map.match_type <> 'rule' OR dict_package_map.rule_id IS DISTINCT FROM EXCLUDED.rule_id)
+    RETURNING fingerprint, rule_id, (evidence->>'rule') AS rule_name)
+  INSERT INTO tmp_applied (fingerprint, rule_id, rule_name) SELECT fingerprint, rule_id, rule_name FROM ins;
+  SELECT count(*) INTO v_count FROM tmp_applied;
 
   UPDATE dict_rules r SET hit_count = r.hit_count + h.n, last_hit_at = now()
-  FROM (SELECT rule_id, count(*) n FROM tmp_matched GROUP BY rule_id) h WHERE h.rule_id = r.id;
+  FROM (SELECT rule_id, count(*) n FROM tmp_applied GROUP BY rule_id) h WHERE h.rule_id = r.id;
 
   SELECT coalesce(jsonb_agg(jsonb_build_object('rule', rule_name, 'hits', n) ORDER BY n DESC), '[]'::jsonb) INTO v_rules
-  FROM (SELECT rule_name, count(*) n FROM tmp_matched GROUP BY rule_name) x;
+  FROM (SELECT rule_name, count(*) n FROM tmp_applied GROUP BY rule_name) x;
 
-  UPDATE inventory_runs SET resolved_rule = v_count WHERE run_id = p_run_id;
+  IF p_run_id IS NOT NULL THEN UPDATE inventory_runs SET resolved_rule = v_count WHERE run_id = p_run_id; END IF;
   RETURN jsonb_build_object('resolved_rule', v_count, 'rules', v_rules);
 END $$;
 
@@ -608,7 +634,7 @@ END $$;
 CREATE OR REPLACE FUNCTION swinv_apply_human_decision(p_review_id int, p_software_name text, p_vendor_name text, p_category_code text,
                                                      p_is_component boolean, p_create_rule boolean, p_actor text)
 RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE q review_queue%ROWTYPE; v_vendor_id int; v_sw_id int; v_pk text; v_vkey text; v_rule_id int; v_pattern text;
+DECLARE q review_queue%ROWTYPE; v_vendor_id int; v_sw_id int; v_pk text; v_vkey text; v_rule_id int; v_pattern text; v_propagated jsonb;
 BEGIN
   SELECT * INTO q FROM review_queue WHERE id = p_review_id;
   IF NOT FOUND THEN RETURN jsonb_build_object('error', 'review item not found'); END IF;
@@ -642,6 +668,9 @@ BEGIN
     VALUES ('Рішення людини: ' || left(q.sample_name, 60), 'name', v_pattern, trim(p_software_name), nullif(trim(p_vendor_name),''),
             p_category_code, coalesce(p_is_component,false), 500, 'human')
     RETURNING id INTO v_rule_id;
+    -- нове правило одразу застосовується до всього парку: перекриває рішення ai/exact, не чіпає human/seed
+    v_propagated := swinv_apply_rules(NULL, NULL, true);
+    PERFORM swinv_set_actor('human:' || coalesce(p_actor,'reviewer'), q.run_id);
   END IF;
 
   UPDATE review_queue SET status = 'resolved', resolved_at = now(), resolved_by = coalesce(p_actor,'reviewer'),
@@ -654,8 +683,59 @@ BEGIN
   WHERE fingerprint = q.fingerprint AND status = 'open';
 
   RETURN jsonb_build_object('software_id', v_sw_id, 'software', p_software_name, 'vendor', p_vendor_name,
-                            'category', p_category_code, 'rule_id', v_rule_id, 'fingerprint', q.fingerprint);
+                            'category', p_category_code, 'rule_id', v_rule_id, 'fingerprint', q.fingerprint,
+                            'propagated', coalesce(v_propagated->>'resolved_rule', '0')::int);
 END $$;
+
+-- 5.10 Перекласифікація накопичених рішень: нові/змінені правила застосовуються до всього парку заднім числом
+--      (перекривають лише ai/exact), опційно — скидання рішень AI (усіх або зі старим prompt_version) для повторного
+--      запиту при наступному зборі. Видалення теж фіксується аудитом (old_row зберігається).
+CREATE OR REPLACE FUNCTION swinv_reclassify(p_host_id int DEFAULT NULL, p_reset_ai boolean DEFAULT false, p_prompt_version text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE v_rules jsonb; v_reset int := 0;
+BEGIN
+  PERFORM swinv_set_actor('reclassify', NULL);
+  v_rules := swinv_apply_rules(p_host_id, NULL, true);
+  IF coalesce(p_reset_ai, false) THEN
+    DELETE FROM dict_package_map m
+    WHERE m.match_type = 'ai'
+      AND (p_prompt_version IS NULL OR m.prompt_version IS DISTINCT FROM p_prompt_version)
+      AND EXISTS (SELECT 1 FROM inventory_packages p WHERE p.fingerprint = m.fingerprint AND p.present
+                    AND (p_host_id IS NULL OR p.host_id = p_host_id));
+    GET DIAGNOSTICS v_reset = ROW_COUNT;
+  END IF;
+  RETURN jsonb_build_object('host_id', p_host_id, 'rules_applied', coalesce((v_rules->>'resolved_rule')::int, 0),
+                            'rules', v_rules->'rules', 'ai_decisions_reset', v_reset,
+                            'note', CASE WHEN v_reset > 0 THEN 'AI буде запитано повторно при наступному зборі; попередні рішення збережено в audit_log' ELSE NULL END);
+END $$;
+
+-- 5.11 Звіт стабільності AI: порівнює скинуті рішення AI (audit_log, DELETE) з новими рішеннями для тих самих відбитків
+CREATE OR REPLACE FUNCTION swinv_ai_consistency_report() RETURNS jsonb LANGUAGE sql STABLE AS $$
+WITH old AS (
+  SELECT DISTINCT ON (a.row_key) a.row_key AS fingerprint, (a.old_row->>'software_id')::int AS software_id, a.at
+  FROM audit_log a
+  WHERE a.table_name = 'dict_package_map' AND a.operation = 'DELETE' AND a.old_row->>'match_type' = 'ai'
+  ORDER BY a.row_key, a.at DESC),
+cmp AS (
+  SELECT o.fingerprint, os.name AS old_software, os.category_code AS old_category, ns.name AS new_software, ns.category_code AS new_category,
+         m.match_type AS new_match_type, m.confidence AS new_confidence
+  FROM old o
+  LEFT JOIN dict_software os ON os.id = o.software_id
+  LEFT JOIN dict_package_map m ON m.fingerprint = o.fingerprint AND m.created_at > o.at
+  LEFT JOIN dict_software ns ON ns.id = m.software_id)
+SELECT jsonb_build_object(
+  'reset_decisions', (SELECT count(*) FROM cmp),
+  'reclassified', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL),
+  'same_product', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND lower(new_software) = lower(old_software)),
+  'same_category', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND new_category = old_category),
+  'same_both', (SELECT count(*) FROM cmp WHERE new_software IS NOT NULL AND lower(new_software) = lower(old_software) AND new_category = old_category),
+  'category_pct', (SELECT round(100.0 * count(*) FILTER (WHERE new_category = old_category) / greatest(count(*) FILTER (WHERE new_software IS NOT NULL), 1), 1) FROM cmp),
+  'product_pct', (SELECT round(100.0 * count(*) FILTER (WHERE lower(new_software) = lower(old_software)) / greatest(count(*) FILTER (WHERE new_software IS NOT NULL), 1), 1) FROM cmp),
+  'differences', (SELECT coalesce(jsonb_agg(to_jsonb(c)), '[]'::jsonb) FROM (
+      SELECT fingerprint, old_software, old_category, new_software, new_category, new_match_type, new_confidence
+      FROM cmp WHERE new_software IS NOT NULL AND (lower(new_software) <> lower(old_software) OR new_category <> old_category)
+      ORDER BY fingerprint LIMIT 40) c))
+$$;
 
 -- ---------------------------------------------------------------------
 -- 6. ПОДАННЯ (VIEWS)

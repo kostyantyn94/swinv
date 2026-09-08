@@ -85,6 +85,8 @@ X-Inventory-Token: <INVENTORY_WEBHOOK_TOKEN>
 | `swinv_finalize_run(run_id)` | `unresolved`, `dict_changes` (= рядків аудиту з цим `run_id`), `duration_ms`, статус `done`, підсумковий JSON |
 | `swinv_apply_human_decision(review_id, software, vendor, category, is_component, create_rule, actor)` | Рішення людини: продукт (може змінити категорію), зіставлення `human=400`, опційне правило `^назва$` з `priority 500`/`origin human`, закриття записів черги з цим відбитком |
 | `swinv_dashboard(p_host_id int DEFAULT NULL)` | Один JSON для дашборду (NULL — увесь парк, інакше один хост; довідники, черга й аудит завжди спільні): перелік хостів із підсумками, зміни обраного хоста за останній збір, KPI, 12 останніх запусків, розподіл рішень, категорії з політиками, порушення, топ продуктів, черга, аудит, правила, джерела, вендори |
+| `swinv_reclassify(p_host_id, p_reset_ai, p_prompt_version)` | Перекласифікація заднім числом: поточні правила до всіх відбитків парку (перекривають лише ai/exact); за `reset_ai` — видалення рішень AI (усіх або зі старим `prompt_version`) з фіксацією в аудиті, повторний запит моделі при наступному зборі. Викликається воркфлоу 5 і автоматично після рішення людини з формою (створене правило) |
+| `swinv_ai_consistency_report()` | Порівняння скинутих рішень AI (audit_log) з новими для тих самих відбитків: частка однакових продуктів і категорій, перелік розбіжностей |
 
 Подання: `v_inventory_current` → `v_software_by_host` → `v_policy_violations` (`policy IN ('prohibited','restricted')`, з урахуванням `dict_software.policy_override`).
 
@@ -222,6 +224,9 @@ VALUES ('Клієнт-банк X', 'name', '^Клієнт-банк X', 'Кліє
 
 **Зміна політики.**
 `UPDATE dict_category SET policy = 'prohibited' WHERE code = 'CLOUD_STORAGE';` або для одного продукту `UPDATE dict_software SET policy_override = 'allowed' WHERE name = 'Microsoft OneDrive';` — обидві зміни аудитуються, подання `v_policy_violations` і дашборд оновлюються миттєво.
+
+### Воркфлоу 5 · Перекласифікація та стабільність AI
+`POST /webhook/inventory/reclassify` (Header Auth; body `{host_id?, reset_ai?, prompt_version?}`) → `swinv_reclassify` → JSON-підсумок; `GET /webhook/inventory/api/consistency` → `swinv_ai_consistency_report`. Закриває «коректне оновлення довідників» для накопичених рішень: нове правило або рішення людини виправляють минуле, а не лише майбутнє.
 
 ## 6. Кросплатформність
 
