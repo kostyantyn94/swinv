@@ -13,7 +13,7 @@
 - [ ] Вкладка 1: дашборд http://localhost:5678/webhook/inventory/dashboard (масштаб браузера 90 %, щоб таблиця запусків влізла по ширині).
 - [ ] Вкладка 2: редактор n8n http://localhost:5678, залогінений (`admin@swinv.local` / пароль з `.env`), відкрито воркфлоу **SWInv · 1. Інвентаризація та класифікація**, канвас підігнано «Zoom to fit».
 - [ ] Вкладка 3: форма http://localhost:5678/form/inventory/review (не відправляти, просто відкрита).
-- [ ] Термінал PowerShell у `D:\bank-test`, шрифт збільшено. Команди нижче — у текстовому файлі для копіювання.
+- [ ] Термінал PowerShell у корені репозиторію (папка `swinv` після `git clone`), шрифт збільшено. Команди нижче — у текстовому файлі для копіювання.
 - [ ] Реєстр чистий від минулих репетицій: `reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SWInvDemoApp"` має повернути помилку «не вдалося знайти».
 - [ ] **Не запускати** `setup.ps1 -Reset` перед демо — це зітре історію запусків, і перший запуск знову триватиме ~70 с.
 
@@ -165,7 +165,7 @@ F5 — Meta Horizon Link переїхав у заборонені, в аудит
 Показує, що реєстр і довідники спільні для парку з різними ОС. З Windows-терміналу запускаємо bash-колектор у контейнері з Debian і відправляємо результат у той самий n8n (контейнер бачить n8n за іменем сервісу):
 
 ```powershell
-docker run --rm --network swinv_default -v D:\bank-test:/repo python:3.12-slim bash /repo/collector/collect-inventory.sh --webhook-url http://n8n:5678/webhook/inventory/ingest --token <INVENTORY_WEBHOOK_TOKEN з .env>
+docker run --rm --network swinv_default -v ${PWD}:/repo python:3.12-slim bash /repo/collector/collect-inventory.sh --webhook-url http://n8n:5678/webhook/inventory/ingest --token <INVENTORY_WEBHOOK_TOKEN з .env>
 ```
 
 Через ~10 с на дашборді: `2 хости`, новий запуск із `dpkg` і `pip`, пакети дистрибутива закриті правилом «Linux: пакети дистрибутива» без AI, а окремі продукти (наприклад `pip`, `setuptools`, `wheel`) — правилом для npm/pip або моделлю. Джерела пакетів видно в картці «Джерела даних».

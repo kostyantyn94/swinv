@@ -66,7 +66,8 @@ flowchart LR
 Вимоги: Windows 10/11, Docker Desktop (WSL2) з підтримкою NVIDIA GPU, ~12 ГБ вільного місця (модель ≈ 9 ГБ), PowerShell 5.1+.
 
 ```powershell
-cd D:\bank-test
+git clone https://github.com/kostyantyn94/swinv.git
+cd swinv
 
 # 1) Увесь стек однією командою (ідемпотентно; -Reset — з нуля, стирає volumes)
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
@@ -111,7 +112,7 @@ GPU для Ollama вмикається окремим файлом `docker-compo
 ## 4. Структура репозиторію
 
 ```
-D:\bank-test\
+swinv\                              ← корінь репозиторію (після git clone)
 ├── README.md                       ← цей документ
 ├── setup.ps1                       ← bootstrap однією командою, Windows (-Reset, -SkipModelPull, -SkipSmoke)
 ├── setup.sh                        ← те саме для Linux / macOS (--reset, --skip-model-pull, --skip-smoke)

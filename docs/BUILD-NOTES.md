@@ -10,7 +10,7 @@
 
 ## Importing workflows (verified)
 - Workflow JSON MUST contain a top-level fixed `"id"` (16 chars, e.g. `swinvIngest00001`) or CLI import fails with a not-null violation. Use stable ids: they are also what `Execute Sub-workflow` nodes reference.
-- Commands (from D:\bank-test, Git Bash needs `export MSYS_NO_PATHCONV=1`):
+- Commands (from the repository root, Git Bash needs `export MSYS_NO_PATHCONV=1`):
   `docker cp file.json swinv-n8n:/tmp/x.json && docker compose exec -T n8n n8n import:workflow --input=/tmp/x.json`
   `docker compose exec -T n8n n8n update:workflow --id=<id> --active=true` then `docker compose restart n8n` (activation via CLI needs a restart to register webhooks). Re-importing the same id overwrites the workflow (upsert).
 - Workflow JSON skeleton: `{"id","name","nodes":[...],"connections":{...},"settings":{"executionOrder":"v1"},"active":false}`. Every node needs `id`, `name`, `type`, `typeVersion`, `position`, `parameters`; webhook-type nodes need a stable `webhookId`.
