@@ -9,7 +9,7 @@
 | Компонент | Де працює | Порт / адреса | Роль |
 |---|---|---|---|
 | `collector/Collect-Inventory.ps1` | Робоча станція (PowerShell 5.1 / 7+) | → `http://<n8n>:5678/webhook/inventory/ingest` | Збір ПЗ із 6 джерел, нормалізація до контракту, файл + POST |
-| n8n `2.37.10` (`swinv-n8n`) | Docker | `5678` | 4 воркфлоу: приймання/класифікація, форма перевірки, дашборд, обробка помилок |
+| n8n `2.37.10` (`swinv-n8n`) | Docker | `5678` | 5 воркфлоу: приймання/класифікація, форма перевірки, дашборд, обробка помилок, перекласифікація та звіт стабільності AI |
 | PostgreSQL 16 (`swinv-postgres`) | Docker | `5432` (для psql з хоста); усередині мережі `postgres` | БД `n8n` (метадані n8n) і БД `inventory` (довідники, інвентар, функції `swinv_*`) |
 | Ollama (`swinv-ollama`) | Docker + NVIDIA GPU | `11434`; усередині мережі `http://ollama:11434` | Локальна LLM `qwen2.5:14b`, `OLLAMA_KEEP_ALIVE=24h`, `OLLAMA_NUM_PARALLEL=1`, flash attention |
 

@@ -40,6 +40,7 @@ flowchart LR
             W2["2. Перевірка людиною<br/>/form/inventory/review"]
             W3["3. Дашборд<br/>GET /webhook/inventory/dashboard<br/>GET /webhook/inventory/api/dashboard"]
             W4["4. Обробка помилок<br/>Error Trigger"]
+            W5["5. Перекласифікація<br/>POST /webhook/inventory/reclassify<br/>GET /webhook/inventory/api/consistency"]
         end
         PG[("PostgreSQL 16 · БД inventory<br/>dict_* · inventory_* · review_queue · audit_log<br/>swinv_* функції, тригери аудиту")]
         OL["Ollama 0.33 · qwen2.5:14b<br/>GPU · temperature 0 · JSON"]
@@ -53,8 +54,10 @@ flowchart LR
     W2 <--> PG
     W3 --> PG
     W4 -- "audit_log" --> PG
+    W5 <--> PG
     A --> W2
     A --> W3
+    A --> W5
 ```
 
 Стек: n8n 2.37.10 · PostgreSQL 16 (дві БД в одному інстансі: `n8n` — метадані n8n, `inventory` — наша) · Ollama з GPU (перевірено на RTX 4090) · модель `qwen2.5:14b`. Усі три сервіси в одному `docker-compose.yml`, проєкт `swinv`.
@@ -76,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\collector\Collect-Inventory.ps1
 ```
 
-Що робить `setup.ps1`: перевіряє/запускає Docker → створює `.env` зі свіжими секретами (з `.env.example`) → `docker compose up -d` → створює БД `inventory`, застосовує `db/schema.sql` і `db/seed.sql` → створює власника n8n через REST → імпортує credentials (CLI) → імпортує та активує 4 воркфлоу (CLI) і перезапускає n8n → завантажує й прогріває модель → smoke-тест: POST `samples/inventory-sample.json` і очікування статусу `done` → друкує URL-и.
+Що робить `setup.ps1`: перевіряє/запускає Docker → створює `.env` зі свіжими секретами (з `.env.example`) → `docker compose up -d` → створює БД `inventory`, застосовує `db/schema.sql` і `db/seed.sql` → створює власника n8n через REST → імпортує credentials (CLI) → імпортує та активує 5 воркфлоу (CLI) і перезапускає n8n → завантажує й прогріває модель → smoke-тест: POST `samples/inventory-sample.json` і очікування статусу `done` → друкує URL-и.
 
 Параметри колектора: `-WebhookUrl` (типово `http://localhost:5678/webhook/inventory/ingest`), `-Token` (типово з `.env` → `INVENTORY_WEBHOOK_TOKEN`), `-OutFile`, `-NoUpload`, `-Sources registry,appx,…`, `-Quiet`. Коди виходу: 0 — ок, 1 — не зібрано жодного пакета, 2 — не вдалося надіслати (файл усе одно записано в `samples/inventory-<host>-<timestamp>.json`).
 
@@ -104,6 +107,8 @@ GPU для Ollama вмикається окремим файлом `docker-compo
 | Дашборд (HTML) | http://localhost:5678/webhook/inventory/dashboard — увесь парк; `?host=<id>` — один ПК із блоком змін за останній збір |
 | Дашборд (JSON API) | http://localhost:5678/webhook/inventory/api/dashboard (той самий параметр `host`) |
 | Форма перевірки | http://localhost:5678/form/inventory/review |
+| Перекласифікація | `POST http://localhost:5678/webhook/inventory/reclassify` (заголовок `X-Inventory-Token`, body `{"host_id"?, "reset_ai"?, "prompt_version"?}`) |
+| Звіт стабільності AI | `GET http://localhost:5678/webhook/inventory/api/consistency` (заголовок `X-Inventory-Token`) |
 | Ollama API | http://localhost:11434 |
 | PostgreSQL | `localhost:5432`, користувач/пароль з `.env`, БД `inventory` |
 
@@ -128,7 +133,7 @@ swinv\                              ← корінь репозиторію (п�
 │   ├── seed.sql                    ← 17 категорій з політиками, 13 вендорів з аліасами, 37 правил
 │   └── init\01-create-inventory-db.sh ← створення БД inventory при першому старті Postgres
 ├── n8n\
-│   ├── build_workflows.py          ← генератор 4 воркфлоу (промпт, валідація, пороги — тут)
+│   ├── build_workflows.py          ← генератор 5 воркфлоу (промпт, валідація, пороги — тут)
 │   ├── code\normalize.js           ← norm_v1: нормалізація і відбиток (вставляється в Code-ноду)
 │   ├── code\dashboard.js           ← рендер HTML-дашборду з одного JSON
 │   ├── credentials\credentials.template.json ← Postgres / Ollama / header-token з фіксованими id
@@ -136,7 +141,8 @@ swinv\                              ← корінь репозиторію (п�
 │       ├── 01-ingest-classify.json ← SWInv · 1. Інвентаризація та класифікація
 │       ├── 02-review-form.json     ← SWInv · 2. Перевірка людиною (форма)
 │       ├── 03-dashboard.json       ← SWInv · 3. Дашборд реєстру ПЗ
-│       └── 04-error-handler.json   ← SWInv · 4. Обробка помилок
+│       ├── 04-error-handler.json   ← SWInv · 4. Обробка помилок
+│       └── 05-reclassify.json      ← SWInv · 5. Перекласифікація та стабільність AI
 ├── scripts\
 │   ├── demo-plant-unknown-app.ps1  ← демо: «встановити» невідому програму (HKCU, без прав адміна)
 │   └── demo-remove-unknown-app.ps1 ← демо: прибрати її
@@ -164,7 +170,7 @@ swinv\                              ← корінь репозиторію (п�
 6. **Крок 3 — AI лише для залишку.** `Довідник категорій` (закритий перелік з `dict_category`) → `БД: крок 3 — невідомі (для AI)` (`swinv_unresolved`, по одному зразку на відбиток) → `Є невідомі пакети?` → `Пакетування (по 10, відсортовано)` → `Цикл по батчах` → `Промпт для AI` → `AI: класифікація (Basic LLM Chain)` з під-нодами `Ollama Chat Model (локально, GPU)` і `Структурований вивід (JSON Schema)` → `Валідація відповіді AI` → `Відповідь валідна?` → `БД: запис результатів AI (пріоритет ai=100)` (`swinv_apply_ai_results`) або `БД: батч у чергу перевірки (AI недоступний / невалідно)` (`swinv_ai_failed`).
 7. **Фіналізація.** `БД: фіналізація запуску (лічильники)` (`swinv_finalize_run`: `unresolved`, `dict_changes`, `duration_ms`, `status = done`) → `Підсумок запуску`.
 
-Інші воркфлоу: **2** — форма перевірки (`Форма: почати перевірку` → `БД: взяти запис із черги` → `Побудова форми (категорії з довідника)` → `Форма: рішення рецензента` → `Розбір рішення` → `БД: застосувати рішення (human=400 + правило + аудит)` → `Форма: збережено`); **3** — дашборд (`swinv_dashboard()` → `Рендер HTML` / JSON); **4** — `Помилка будь-якого воркфлоу SWInv` → `БД: запис у audit_log`.
+Інші воркфлоу: **2** — форма перевірки (`Форма: почати перевірку` → `БД: взяти запис із черги` → `Побудова форми (категорії з довідника)` → `Форма: рішення рецензента` → `Розбір рішення` → `БД: застосувати рішення (human=400 + правило + аудит)` → `Форма: збережено`); **3** — дашборд (`swinv_dashboard()` → `Рендер HTML` / JSON); **4** — `Помилка будь-якого воркфлоу SWInv` → `БД: запис у audit_log`; **5** — перекласифікація (`Webhook: POST /inventory/reclassify` → `Параметри перекласифікації` → `БД: перекласифікація (правила заднім числом, скидання AI)` → `JSON-відповідь`; `Webhook: GET /inventory/api/consistency` → `БД: звіт стабільності AI` → `JSON-відповідь (звіт)`).
 
 ---
 
