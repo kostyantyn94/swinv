@@ -1,0 +1,78 @@
+{
+  "id": "swinvErrors00001",
+  "name": "SWInv · 4. Обробка помилок",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "n001",
+      "name": "Помилка будь-якого воркфлоу SWInv",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (table_name, operation, row_key, new_row, actor, note) VALUES ('n8n_workflow', 'error', $1::text, $2::jsonb, 'n8n', $3::text) RETURNING id",
+        "options": {
+          "queryReplacement": "={{ [ ($json.workflow && $json.workflow.name) || 'unknown', JSON.stringify({ execution: $json.execution, workflow: $json.workflow }), String(($json.execution && $json.execution.error && $json.execution.error.message) || 'error').slice(0, 500) ] }}"
+        }
+      },
+      "id": "n002",
+      "name": "БД: запис у audit_log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Обробка помилок\nБудь-яка помилка воркфлоу SWInv фіксується в audit_log (видно на дашборді). Сюди ж можна додати Telegram/Email-сповіщення.",
+        "height": 110,
+        "width": 600,
+        "color": 2
+      },
+      "id": "n004",
+      "name": "Note n003",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Помилка будь-якого воркфлоу SWInv": {
+      "main": [
+        [
+          {
+            "node": "БД: запис у audit_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

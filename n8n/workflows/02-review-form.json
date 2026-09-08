@@ -1,0 +1,310 @@
+{
+  "id": "swinvReview00001",
+  "name": "SWInv · 2. Перевірка людиною (форма)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "SWInv · Перевірка класифікації ПЗ",
+        "formDescription": "Черга записів, де AI не був упевнений. Ваше рішення має найвищий пріоритет (human = 400) і записується в довідники з аудитом.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "ID запису з черги (порожньо — наступний)",
+              "fieldType": "number",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {
+          "path": "inventory/review",
+          "buttonLabel": "Відкрити запис"
+        }
+      },
+      "id": "n001",
+      "name": "Форма: почати перевірку",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "swinv-inventory-review-0001"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT q.*, (SELECT count(*) FROM review_queue WHERE status = 'open') AS open_total, (SELECT jsonb_agg(jsonb_build_object('code', code, 'name_uk', name_uk, 'policy', policy) ORDER BY sort_order) FROM dict_category) AS categories FROM review_queue q WHERE q.status = 'open' AND ($1::int IS NULL OR q.id = $1::int) ORDER BY q.created_at, q.id LIMIT 1",
+        "options": {
+          "queryReplacement": "={{ [ ($json['ID запису з черги (порожньо — наступний)'] ? Number($json['ID запису з черги (порожньо — наступний)']) : null) ] }}"
+        }
+      },
+      "id": "n002",
+      "name": "БД: взяти запис із черги",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-empty",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "notExists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n003",
+      "name": "Черга порожня?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "Черга перевірки порожня 🎉",
+        "completionMessage": "Усі рішення AI підтверджені або перекриті людиною. Довідники в консистентному стані.",
+        "options": {}
+      },
+      "id": "n004",
+      "name": "Форма: черга порожня",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        780,
+        140
+      ],
+      "webhookId": "swinv-review-empty-0001"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Динамічна форма: категорії з довідника (закритий перелік), пропозиція AI як значення за замовчуванням\nconst q = $input.first().json;\nconst cats = q.categories || [];\nconst catOptions = cats.map(c => ({ option: `${c.code} — ${c.name_uk}` }));\nconst proposedCat = cats.find(c => c.code === q.proposed_category);\nconst reasonUk = { low_confidence: 'низька впевненість AI', unknown_category: 'категорія поза переліком', invalid_output: 'некоректна відповідь AI', ai_unavailable: 'AI був недоступний', manual: 'ручне' }[q.reason] || q.reason;\nconst html = `\n<div style=\"font-family:system-ui;line-height:1.5\">\n  <p><b>Пакет:</b> ${q.sample_name || ''}<br>\n  <b>Видавець:</b> ${q.sample_publisher || '—'} &nbsp; <b>Джерело:</b> ${q.sample_source || ''} &nbsp; <b>Версія:</b> ${q.sample_version || '—'}<br>\n  <b>Відбиток:</b> <code>${q.fingerprint}</code></p>\n  <p><b>Пропозиція AI:</b> ${q.proposed_software || '—'} / ${q.proposed_vendor || '—'} / ${q.proposed_category || '—'}\n  (впевненість ${q.confidence != null ? Number(q.confidence).toFixed(2) : '—'}) — <i>${q.ai_reason || ''}</i><br>\n  <b>Причина перевірки:</b> ${reasonUk} &nbsp; <b>Запис №${q.id}</b>, відкритих у черзі: ${q.open_total}</p>\n</div>`;\nconst form = [\n  { fieldLabel: 'Деталі', fieldType: 'html', elementName: 'details', html },\n  { fieldLabel: 'Назва продукту', fieldType: 'text', placeholder: 'Канонічна назва без версії', defaultValue: q.proposed_software || q.sample_name || '', requiredField: true },\n  { fieldLabel: 'Вендор', fieldType: 'text', placeholder: 'Без Inc./LLC/s.r.o.', defaultValue: q.proposed_vendor || q.sample_publisher || '', requiredField: false },\n  { fieldLabel: 'Категорія', fieldType: 'dropdown', fieldOptions: { values: catOptions }, defaultValue: proposedCat ? `${proposedCat.code} — ${proposedCat.name_uk}` : '', requiredField: true },\n  { fieldLabel: 'Це складова іншого продукту?', fieldType: 'dropdown', fieldOptions: { values: [{ option: 'Ні' }, { option: 'Так' }] }, defaultValue: q.proposed_is_component ? 'Так' : 'Ні', requiredField: true },\n  { fieldLabel: 'Створити правило точного збігу (AI більше не питатимуть)', fieldType: 'dropdown', fieldOptions: { values: [{ option: 'Так' }, { option: 'Ні' }] }, defaultValue: 'Так', requiredField: true },\n];\nreturn [{ json: { form, review_id: q.id } }];\n"
+      },
+      "id": "n005",
+      "name": "Побудова форми (категорії з довідника)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "page",
+        "defineForm": "json",
+        "jsonOutput": "={{ JSON.stringify($json.form) }}",
+        "options": {
+          "formTitle": "Рішення рецензента",
+          "buttonLabel": "Зберегти в довідник"
+        }
+      },
+      "id": "n006",
+      "name": "Форма: рішення рецензента",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1040,
+        360
+      ],
+      "webhookId": "swinv-review-page-0001"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Розбір відповіді форми -> параметри для swinv_apply_human_decision\nconst a = $input.first().json;\nconst q = $('БД: взяти запис із черги').first().json;\nconst catRaw = String(a['Категорія'] || '');\nconst category = catRaw.split(' — ')[0].trim();\nreturn [{ json: {\n  review_id: q.id,\n  software_name: String(a['Назва продукту'] || '').trim(),\n  vendor_name: String(a['Вендор'] || '').trim() || null,\n  category_code: category,\n  is_component: String(a['Це складова іншого продукту?'] || 'Ні') === 'Так',\n  create_rule: String(a['Створити правило точного збігу (AI більше не питатимуть)'] || 'Так') === 'Так',\n  actor: 'reviewer@n8n-form'\n} }];\n"
+      },
+      "id": "n007",
+      "name": "Розбір рішення",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_apply_human_decision($1::int, $2::text, $3::text, $4::text, $5::boolean, $6::boolean, $7::text) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $json.review_id, $json.software_name, $json.vendor_name, $json.category_code, $json.is_component, $json.create_rule, $json.actor ] }}"
+        }
+      },
+      "id": "n008",
+      "name": "БД: застосувати рішення (human=400 + правило + аудит)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1560,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "text",
+        "completionTitle": "Збережено ✔",
+        "completionMessage": "={{ $json.result.error ? ('Помилка: ' + $json.result.error) : ('«' + $json.result.software + '» → ' + $json.result.category + ($json.result.rule_id ? '. Створено правило #' + $json.result.rule_id + ' — AI більше не питатимуть про цей пакет.' : '.') + ' Зміни записано в audit_log.') }}",
+        "options": {}
+      },
+      "id": "n009",
+      "name": "Форма: збережено",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1820,
+        360
+      ],
+      "webhookId": "swinv-review-done-0001"
+    },
+    {
+      "parameters": {
+        "content": "## Людина в контурі (human-in-the-loop)\nn8n Form → наступний запис черги → категорії з довідника (закритий перелік) → рішення з пріоритетом **human=400** (перекриває AI/правила назавжди) → опційно правило точного збігу → audit_log.\nURL: /form/inventory/review",
+        "height": 140,
+        "width": 900,
+        "color": 6
+      },
+      "id": "n011",
+      "name": "Note n010",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Форма: почати перевірку": {
+      "main": [
+        [
+          {
+            "node": "БД: взяти запис із черги",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: взяти запис із черги": {
+      "main": [
+        [
+          {
+            "node": "Черга порожня?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Черга порожня?": {
+      "main": [
+        [
+          {
+            "node": "Форма: черга порожня",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Побудова форми (категорії з довідника)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Побудова форми (категорії з довідника)": {
+      "main": [
+        [
+          {
+            "node": "Форма: рішення рецензента",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Форма: рішення рецензента": {
+      "main": [
+        [
+          {
+            "node": "Розбір рішення",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Розбір рішення": {
+      "main": [
+        [
+          {
+            "node": "БД: застосувати рішення (human=400 + правило + аудит)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: застосувати рішення (human=400 + правило + аудит)": {
+      "main": [
+        [
+          {
+            "node": "Форма: збережено",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "swinvErrors00001"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

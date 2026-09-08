@@ -1,0 +1,11 @@
+# local configuration and overrides (never committed)
+.env
+*.local.*
+
+# per-run collector snapshots (the committed offline sample is samples/inventory-sample.json)
+samples/inventory-*-*.json
+!samples/inventory-sample.json
+
+# scratch
+*.log
+__pycache__/

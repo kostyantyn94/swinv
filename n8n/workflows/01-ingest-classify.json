@@ -1,0 +1,881 @@
+{
+  "id": "swinvIngest00001",
+  "name": "SWInv · 1. Інвентаризація та класифікація",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inventory/ingest",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false
+        }
+      },
+      "id": "n001",
+      "name": "Webhook: POST /inventory/ingest",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        400
+      ],
+      "webhookId": "swinv-inventory-ingest-0001",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "swinvWebhookTok",
+          "name": "SWInv Collector Token (header X-Inventory-Token)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Валідація payload колектора (контракт docs/CONTRACT-collector.md)\nconst body = $input.first().json.body || {};\nconst errors = [];\nif (body.schema_version !== '1.0') errors.push('schema_version має бути \"1.0\"');\nif (!body.host || !body.host.machine_id || !body.host.hostname) errors.push('host.machine_id / host.hostname відсутні');\nif (!Array.isArray(body.packages) || body.packages.length === 0) errors.push('packages порожній');\nif (!body.run_id) errors.push('run_id відсутній');\nif (errors.length) throw new Error('Некоректний payload: ' + errors.join('; '));\nconst required = ['source', 'source_key', 'name'];\nconst bad = body.packages.filter(p => required.some(k => !p[k]));\nif (bad.length) throw new Error(`У ${bad.length} пакетів відсутні обов'язкові поля (source, source_key, name)`);\nconst bySource = {};\nfor (const p of body.packages) bySource[p.source] = (bySource[p.source] || 0) + 1;\nreturn [{ json: {\n  host: body.host,\n  run: { run_id: body.run_id, collected_at: body.collected_at, collector_version: (body.collector || {}).version || null,\n         sources: body.sources || [], packages_total: body.packages.length },\n  packages: body.packages,\n  summary: { packages: body.packages.length, by_source: bySource }\n}}];\n"
+      },
+      "id": "n002",
+      "name": "Валідація payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n//  SWInv — norm_v1: нормалізація пакетів і обчислення відбитка (fingerprint)\n//  Цей самий код вставлено у Code-ноду «Нормалізація (norm_v1)» воркфлоу Ingest.\n//  Правило: однаковий пакет (без урахування версії/розрядності/локалі) => однаковий відбиток\n//  => один і той самий запис довідника => жодного повторного звернення до AI.\n// =====================================================================\nconst NORM_VERSION = 'norm_v1';\n\n// ВАЖЛИВО: список синхронізовано з SQL-функцією swinv_vendor_key (db/schema.sql)\nconst LEGAL_SUFFIXES = /(^|\\s)(inc|incorporated|corp|corporation|co|company|ltd|limited|llc|gmbh|sro|s r o|plc|ag|sa|srl|bv|oy|ab|pte|pty|the|software|team|foundation|technologies|technology|systems|корпорація|корпорация|тов|ооо|компанія|компания)(?=\\s|$)/g;\n\nfunction vendorKey(publisher) {\n  if (!publisher) return null;\n  let s = String(publisher).normalize('NFKC').toLowerCase()\n    .replace(/[™®©,.]/g, ' ')\n    .replace(LEGAL_SUFFIXES, ' ')\n    .replace(/\\s+/g, ' ').trim();\n  return s || null;\n}\n\n// Очищена назва для показу (зберігає регістр): без версій, розрядності, локалі\nfunction cleanName(name) {\n  if (!name) return '';\n  let s = String(name).normalize('NFKC')\n    .replace(/[™®©]/g, '')\n    .replace(/\\s*[\\(\\[]\\s*((x64|x86|amd64|arm64|ia64|64[\\s-]?bit|32[\\s-]?bit|64-розрядн\\w*|32-розрядн\\w*|64-разрядн\\w*|32-разрядн\\w*)\\s*)+[\\)\\]]/gi, '')\n    .replace(/\\s+(x64|x86|amd64|arm64|64[\\s-]?bit|32[\\s-]?bit)\\b/gi, '')\n    .replace(/\\s+-\\s+[a-z]{2}-[a-z]{2}\\b/gi, '')                      // \" - ru-ru\", \" - en-us\"\n    .replace(/\\b(version|версія|версия|v\\.?)\\s*\\d[\\w.\\-]*/gi, '')     // \"version 1.2\", \"v2.3\"\n    .replace(/\\s+\\d+(\\.\\d+){1,4}(\\s*\\([\\w.\\-]+\\))?\\s*$/g, '')        // trailing \"26.00\", \"2025.2.4\", \"1.2.3 (b45)\"\n    .replace(/\\s+\\d+(\\.\\d+){1,4}\\s+/g, ' ')                          // inner \"3.12.10 \"\n    .replace(/\\s+-\\s*$/g, '')\n    .replace(/\\s{2,}/g, ' ').trim();\n  return s || String(name).trim();\n}\n\nfunction normalizeName(name) {\n  return cleanName(name).toLowerCase().replace(/\\s+/g, ' ').trim();\n}\n\n// Стабільні ідентифікатори мають пріоритет над назвою\nfunction fingerprint(pkg) {\n  const src = pkg.source;\n  if (src === 'appx') {\n    const fam = (pkg.raw && pkg.raw.package_family_name) || String(pkg.source_key).replace(/_[^_]+_[^_]+_[^_]*_/, '_');\n    return `appx|${fam.toLowerCase()}`;\n  }\n  if (src === 'vscode' || src === 'npm' || src === 'pip') return `${src}|${String(pkg.source_key).toLowerCase()}`;\n  if (src === 'registry' && /\\\\Steam App \\d+$/i.test(pkg.source_key)) return `steam|${pkg.source_key.split('\\\\').pop().toLowerCase()}`;\n  const n = normalizeName(pkg.name);\n  const v = vendorKey(pkg.publisher) || '';\n  return `${src}|${n}|${v}`;\n}\n\nfunction normalizePackage(pkg) {\n  const name_clean = cleanName(pkg.name);\n  const name_normalized = normalizeName(pkg.name);\n  const publisher_normalized = vendorKey(pkg.publisher);\n  return Object.assign({}, pkg, {\n    name_clean,\n    name_normalized,\n    publisher_normalized,\n    fingerprint: fingerprint(pkg),\n    norm_version: NORM_VERSION,\n  });\n}\n\n\n// ---- застосування до payload ----\nconst input = $input.first().json;\nconst packages = input.packages.map(normalizePackage);\nconst fps = new Set(packages.map(p => p.fingerprint));\nreturn [{ json: { host: input.host, run: input.run, packages,\n  summary: Object.assign({}, input.summary, { fingerprints: fps.size, norm_version: NORM_VERSION }) } }];\n"
+      },
+      "id": "n003",
+      "name": "Нормалізація (norm_v1)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM swinv_upsert_host_run($1::jsonb, $2::jsonb)",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.host), JSON.stringify($json.run) ] }}"
+        }
+      },
+      "id": "n004",
+      "name": "БД: хост + запуск",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        720,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_ingest_packages($1::int, $2::uuid, $3::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $json.host_id, $json.run_id, JSON.stringify($('Нормалізація (norm_v1)').first().json.packages) ] }}"
+        }
+      },
+      "id": "n005",
+      "name": "БД: пакети + diff (jsonb, set-based)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        960,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true, run_id: $('БД: хост + запуск').first().json.run_id, host_id: $('БД: хост + запуск').first().json.host_id, diff: $json.result, note: 'класифікація виконується асинхронно; дашборд: /webhook/inventory/dashboard' }) }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n006",
+      "name": "Відповідь колектору (202 Accepted)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_match_exact($1::int, $2::uuid) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.host_id, $('БД: хост + запуск').first().json.run_id ] }}"
+        }
+      },
+      "id": "n007",
+      "name": "БД: крок 1 — точні збіги (довідник)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1440,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_apply_rules($1::int, $2::uuid) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.host_id, $('БД: хост + запуск').first().json.run_id ] }}"
+        }
+      },
+      "id": "n008",
+      "name": "БД: крок 2 — правила (dict_rules)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1680,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT jsonb_agg(jsonb_build_object('code', code, 'name_uk', name_uk, 'name_en', name_en, 'description', description, 'policy', policy) ORDER BY sort_order) AS categories FROM dict_category",
+        "options": {}
+      },
+      "id": "n009",
+      "name": "Довідник категорій",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1920,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM swinv_unresolved($1::int) ORDER BY fingerprint",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.host_id ] }}"
+        }
+      },
+      "id": "n010",
+      "name": "БД: крок 3 — невідомі (для AI)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2160,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-unres",
+              "leftValue": "={{ $json.fingerprint }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n011",
+      "name": "Є невідомі пакети?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2400,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Невідомі відбитки -> батчі фіксованого розміру, відсортовані (детермінований порядок промптів)\nconst rows = $input.all().map(i => i.json).filter(r => r && r.fingerprint);\nrows.sort((a, b) => a.fingerprint < b.fingerprint ? -1 : a.fingerprint > b.fingerprint ? 1 : 0);\nconst SIZE = 10;\nconst out = [];\nfor (let i = 0; i < rows.length; i += SIZE) {\n  const chunk = rows.slice(i, i + SIZE).map((r, k) => ({ id: k + 1, fingerprint: r.fingerprint, name: r.name, name_clean: r.name_clean,\n    publisher: r.publisher, source: r.source, version: r.version, winget_id: r.winget_id,\n    is_system_component: !!r.is_system_component, install_location: r.install_location, occurrences: r.occurrences }));\n  out.push({ json: { batch_no: out.length + 1, total_batches: Math.ceil(rows.length / SIZE), size: chunk.length, items: chunk } });\n}\nreturn out;\n"
+      },
+      "id": "n012",
+      "name": "Пакетування (по 10, відсортовано)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "n013",
+      "name": "Цикл по батчах",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2880,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Формування промпту (prompt_version = p1). Таксономія береться з довідника dict_category (закритий перелік).\nconst batch = $input.first().json;\nconst cats = ($('Довідник категорій').first().json.categories) || [];\nconst model = $env.OLLAMA_MODEL || 'qwen2.5:14b';\nconst catLines = cats.map(c => `- ${c.code} — ${c.name_uk} (${c.name_en}): ${c.description || ''}`).join('\\n');\nconst system = [\n  'You are a software asset management (SAM) analyst at a bank. You receive a numbered list of software PACKAGES detected on a Windows PC',\n  '(registry Uninstall entries, MSIX/Appx packages, winget rows, npm/pip packages, VS Code extensions).',\n  'For EACH input package return one object with fields:',\n  '- id: the same integer id as in the input (echo back; every input id exactly once)',\n  '- software: canonical PRODUCT name the package belongs to. No version numbers, no architecture (x64/x86), no locale suffixes.',\n  '  Keep a year only when it is part of the product name (e.g. \"Microsoft SQL Server 2025\"). Sub-components map to the PARENT product',\n  '  (e.g. \"SQL Server 2025 Database Engine Shared\" -> \"Microsoft SQL Server 2025\"; \"ENE_MousePad_HAL\" -> \"ENE Device HAL Drivers\").',\n  '- vendor: canonical vendor name without legal suffixes (Inc., LLC, Ltd, s.r.o., Corporation). Use Latin script for well-known vendors.',\n  '- category: exactly ONE code from the closed list below. If you truly cannot decide, use UNKNOWN. Never invent codes.',\n  '- is_component: true if the package is a sub-component / runtime piece / HAL / helper of a larger product, false if it IS the product.',\n  '- confidence: number 0.0-1.0 for software+category together.',\n  '- reason: short justification in Ukrainian, max 12 words.',\n  '',\n  'Closed category list (code — Ukrainian name (English name): what belongs):',\n  catLines,\n  '',\n  'Guidance: games, game launchers, game mods, emulators for games and gaming overlays are GAMES; VPN, tunnels and remote desktop tools are REMOTE_ACCESS;',\n  'hardware vendor utilities, HAL, firmware, capture-box and RGB/peripheral tools are DRIVER; Windows inbox apps, system MSIX packages and GUID-named Microsoft',\n  'system packages are OS_COMPONENT; frameworks, redistributables, SDK runtimes (Vulkan, PlayStation PC SDK Runtime, WinAppRuntime) are RUNTIME;',\n  'torrent clients, screenshot tools, virtual drives are SYSTEM_UTILITY; note-taking, whiteboard, design (Figma) and writing assistants (Grammarly) are OFFICE;',\n  'Android emulators (LDPlayer, BlueStacks) are VIRTUALIZATION; cloud CLIs (Google Cloud SDK, twilio-cli, ngrok) and debuggers are DEV_TOOLS.',\n  'Software from a piracy/torrent site publisher: classify by what the software is (a game -> GAMES) and mention the source in reason.',\n  '',\n  'Examples (input -> software | vendor | category | is_component | confidence):',\n  '- \"Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33135\" | Microsoft Corporation -> Microsoft Visual C++ Redistributable | Microsoft | RUNTIME | false | 0.98',\n  '- \"SQL Server 2025 Database Engine Shared\" | Microsoft Corporation -> Microsoft SQL Server 2025 | Microsoft | DATABASE | true | 0.97',\n  '- \"TunnelBear\" | TunnelBear -> TunnelBear | TunnelBear | REMOTE_ACCESS | false | 0.95',\n  '- \"Warcraft III\" | Blizzard Entertainment -> Warcraft III | Blizzard Entertainment | GAMES | false | 0.97',\n  '- \"Термінал Windows\" | Microsoft -> Windows Terminal | Microsoft | DEV_TOOLS | false | 0.95',\n  '- \"1527c705-839a-4832-9118-54d4Bd6a0c89\" | Microsoft Corporation (appx, system) -> Windows System Package | Microsoft | OS_COMPONENT | true | 0.7',\n  '',\n  'Return ONLY a JSON object of the form: items = array of objects with the fields above. No prose.'\n].join('\\n');\nconst lines = batch.items.map(it => {\n  const parts = [`name=\"${it.name}\"`, `publisher=\"${it.publisher || ''}\"`, `source=${it.source}`];\n  if (it.version) parts.push(`version=${it.version}`);\n  if (it.winget_id) parts.push(`winget_id=${it.winget_id}`);\n  if (it.is_system_component) parts.push('system_component=true');\n  if (it.install_location) parts.push(`location=\"${String(it.install_location).split(/[\\\\/]/).slice(-2).join('/')}\"`);\n  return `${it.id}. ${parts.join(' | ')}`;\n});\nconst prompt = `Classify these ${batch.items.length} packages (batch ${batch.batch_no}/${batch.total_batches}). Return one object with key \"items\" and exactly ${batch.items.length} entries (ids 1..${batch.items.length}).\\n` + lines.join('\\n');\nreturn [{ json: Object.assign({}, batch, { system_prompt: system, prompt, model, prompt_version: 'p1' }) }];\n"
+      },
+      "id": "n014",
+      "name": "Промпт для AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "hasOutputParser": true,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "={{ $json.system_prompt }}"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "id": "n015",
+      "name": "AI: класифікація (Basic LLM Chain)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        3360,
+        -60
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "model": "={{ $env.OLLAMA_MODEL || 'qwen2.5:14b' }}",
+        "options": {
+          "temperature": 0,
+          "format": "json",
+          "numCtx": 8192,
+          "numPredict": 2048,
+          "keepAlive": "24h",
+          "topK": 1
+        }
+      },
+      "id": "n016",
+      "name": "Ollama Chat Model (локально, GPU)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        3300,
+        180
+      ],
+      "credentials": {
+        "ollamaApi": {
+          "id": "swinvOllama0001",
+          "name": "SWInv Ollama (local GPU)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"items\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\n            \"type\": \"integer\"\n          },\n          \"software\": {\n            \"type\": \"string\"\n          },\n          \"vendor\": {\n            \"type\": \"string\"\n          },\n          \"category\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"OS_COMPONENT\",\n              \"RUNTIME\",\n              \"DRIVER\",\n              \"DEV_TOOLS\",\n              \"DATABASE\",\n              \"VIRTUALIZATION\",\n              \"OFFICE\",\n              \"BROWSER\",\n              \"COMMUNICATION\",\n              \"SECURITY\",\n              \"SYSTEM_UTILITY\",\n              \"MEDIA\",\n              \"REMOTE_ACCESS\",\n              \"CLOUD_STORAGE\",\n              \"AI_ASSISTANT\",\n              \"GAMES\",\n              \"OTHER\",\n              \"UNKNOWN\"\n            ]\n          },\n          \"is_component\": {\n            \"type\": \"boolean\"\n          },\n          \"confidence\": {\n            \"type\": \"number\"\n          },\n          \"reason\": {\n            \"type\": \"string\"\n          }\n        },\n        \"required\": [\n          \"id\",\n          \"software\",\n          \"vendor\",\n          \"category\",\n          \"is_component\",\n          \"confidence\"\n        ]\n      }\n    }\n  },\n  \"required\": [\n    \"items\"\n  ]\n}",
+        "autoFix": false
+      },
+      "id": "n017",
+      "name": "Структурований вивід (JSON Schema)",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        3520,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "n018",
+      "name": "OpenAI Chat Model (альтернатива, вимкнено)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3300,
+        360
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Детермінована валідація відповіді AI: echo-back id, закритий перелік категорій, пороги впевненості.\n// Нічого не потрапляє в довідник, поки не пройде цю перевірку.\nconst batch = $('Промпт для AI').first().json;\nconst cats = new Set((($('Довідник категорій').first().json.categories) || []).map(c => c.code));\nconst raw = $input.first().json;\nlet out = raw.output;\nif (typeof out === 'string') { try { out = JSON.parse(out); } catch (e) { out = null; } }\nlet items = out && (Array.isArray(out) ? out : (out.items || (out.output && out.output.items)));\nif (!Array.isArray(items)) {\n  return [{ json: { ok: false, reason: 'invalid_output', error: 'AI не повернув масив items', batch_no: batch.batch_no } }];\n}\nconst ACCEPT = 0.80, ACCEPT_REVIEW = 0.60;\nconst byId = new Map(batch.items.map(it => [it.id, it]));\nconst seen = new Set(); const results = []; const stats = { accept: 0, accept_review: 0, review: 0, invalid: 0 };\nfor (const r of items) {\n  const id = Number(r.id); const src = byId.get(id);\n  if (!src || seen.has(id)) { stats.invalid++; continue; }\n  seen.add(id);\n  let cat = String(r.category || '').toUpperCase().trim();\n  let conf = Number(r.confidence); if (!isFinite(conf)) conf = 0; conf = Math.max(0, Math.min(1, conf));\n  const software = String(r.software || '').trim().slice(0, 200);\n  const vendor = String(r.vendor || '').trim().slice(0, 120);\n  let decision, review_reason = null;\n  if (!cats.has(cat)) { decision = 'review'; review_reason = 'unknown_category'; cat = null; }\n  else if (cat === 'OTHER') { decision = 'review'; review_reason = 'low_confidence'; }\n  else if (!software) { decision = 'review'; review_reason = 'invalid_output'; }\n  else if (conf >= ACCEPT) decision = 'accept';\n  else if (conf >= ACCEPT_REVIEW) { decision = 'accept_review'; review_reason = 'low_confidence'; }\n  else { decision = 'review'; review_reason = 'low_confidence'; }\n  stats[decision]++;\n  results.push({ fingerprint: src.fingerprint, decision, software_name: software || null, vendor_name: vendor || null,\n    category_code: cat, is_component: !!r.is_component, confidence: Number(conf.toFixed(3)), reason: String(r.reason || '').slice(0, 200),\n    review_reason, sample_name: src.name, sample_publisher: src.publisher || null, sample_source: src.source, sample_version: src.version || null });\n}\nfor (const it of batch.items) {\n  if (seen.has(it.id)) continue;\n  stats.review++;\n  results.push({ fingerprint: it.fingerprint, decision: 'review', software_name: null, vendor_name: null, category_code: null, is_component: false,\n    confidence: 0, reason: 'AI не повернув відповідь для цього пакета', review_reason: 'invalid_output',\n    sample_name: it.name, sample_publisher: it.publisher || null, sample_source: it.source, sample_version: it.version || null });\n}\nif (seen.size < Math.ceil(batch.items.length / 2)) {\n  return [{ json: { ok: false, reason: 'invalid_output', error: `echo-back провалено: ${seen.size} з ${batch.items.length} id`, batch_no: batch.batch_no } }];\n}\nreturn [{ json: { ok: true, batch_no: batch.batch_no, model: batch.model, prompt_version: batch.prompt_version, stats, results } }];\n"
+      },
+      "id": "n019",
+      "name": "Валідація відповіді AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n020",
+      "name": "Відповідь валідна?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4000,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_apply_ai_results($1::uuid, $2::int, $3::text, $4::text, $5::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.run_id, $('БД: хост + запуск').first().json.host_id, $json.model, $json.prompt_version, JSON.stringify($json.results) ] }}"
+        }
+      },
+      "id": "n021",
+      "name": "БД: запис результатів AI (пріоритет ai=100)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        4260,
+        -160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_ai_failed($1::uuid, $2::int, $3::jsonb, $4::text, $5::text) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.run_id, $('БД: хост + запуск').first().json.host_id, JSON.stringify($('Промпт для AI').first().json.items.map(i => ({ fingerprint: i.fingerprint, name: i.name, publisher: i.publisher, source: i.source, version: i.version }))), ($json.ok === false ? $json.reason : 'ai_unavailable'), String(($json.error && $json.error.message) || $json.error || $json.message || 'LLM error').slice(0, 500) ] }}"
+        }
+      },
+      "id": "n022",
+      "name": "БД: батч у чергу перевірки (AI недоступний / невалідно)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        4260,
+        80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_finalize_run($1::uuid) AS result",
+        "options": {
+          "queryReplacement": "={{ [ $('БД: хост + запуск').first().json.run_id ] }}"
+        }
+      },
+      "id": "n023",
+      "name": "БД: фіналізація запуску (лічильники)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3120,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst r = $input.first().json.result || {};\nconst line = `Запуск ${r.run_id}: пакетів ${r.packages_total} (нових ${r.added}, змінених ${r.changed}, видалених ${r.removed}); ` +\n  `відбитків ${r.fingerprints_total}, відомі до запуску ${r.known_before}, закрито правилами ${r.resolved_rule}, точно ${r.resolved_exact}, ` +\n  `AI ${r.resolved_ai} (звернень до AI: ${r.ai_calls}), без продукту ${r.unresolved}, змін довідників ${r.dict_changes}, ${r.duration_ms} мс`;\nreturn [{ json: Object.assign({ summary: line }, r) }];\n"
+      },
+      "id": "n024",
+      "name": "Підсумок запуску",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1 · Приймання та нормалізація\nКолектор (PowerShell) надсилає JSON зі всіма пакетами ПК. Валідація контракту → **norm_v1**: один відбиток для пакета незалежно від версії, розрядності, локалі. Set-based upsert у Postgres (jsonb_to_recordset) + diff added/changed/removed. Колектор отримує відповідь одразу, класифікація йде асинхронно.",
+        "height": 150,
+        "width": 1200,
+        "color": 4
+      },
+      "id": "n026",
+      "name": "Note n025",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2 · Детерміноване зіставлення — БЕЗ AI\nКрок 1: відбиток уже в довіднику → продукт відомий, AI не викликається. Крок 2: **правила як дані** (dict_rules, regex у Postgres). Тільки те, що залишилось, іде на крок 3.\nПовторний запуск на тому ж ПК → 0 звернень до AI, 0 змін довідників.",
+        "height": 150,
+        "width": 1200,
+        "color": 4
+      },
+      "id": "n028",
+      "name": "Note n027",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3 · AI лише для невідомого\nБатчі по 10, відсортовані (детермінований промпт). Таксономія — закритий перелік з dict_category. temperature 0, JSON Schema, echo-back id, пороги впевненості (≥0.80 прийняти, 0.60–0.80 прийняти + на перевірку, <0.60 лише перевірка).\n**Модель — локальна (Ollama на GPU): дані не залишають периметр.** Заміна на OpenAI = одна нода поруч.",
+        "height": 190,
+        "width": 1300,
+        "color": 5
+      },
+      "id": "n030",
+      "name": "Note n029",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4 · Запис у довідники з пріоритетами\ndict_package_map: human(400) > seed(350) > rule(300) > exact(200) > ai(100). `ON CONFLICT … WHERE EXCLUDED.priority >= priority` — AI ніколи не перезапише рішення людини. Кожна зміна довідника → audit_log (тригер БД).",
+        "height": 190,
+        "width": 620,
+        "color": 6
+      },
+      "id": "n032",
+      "name": "Note n031",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4200,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 5 · Фіналізація\nЛічильники запуску (inventory_runs): відомі/правила/AI/нерозв'язані, звернення до AI, зміни довідників. Це числовий доказ прогнозованості на дашборді.",
+        "height": 120,
+        "width": 640,
+        "color": 7
+      },
+      "id": "n034",
+      "name": "Note n033",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3080,
+        660
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: POST /inventory/ingest": {
+      "main": [
+        [
+          {
+            "node": "Валідація payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Валідація payload": {
+      "main": [
+        [
+          {
+            "node": "Нормалізація (norm_v1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Нормалізація (norm_v1)": {
+      "main": [
+        [
+          {
+            "node": "БД: хост + запуск",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: хост + запуск": {
+      "main": [
+        [
+          {
+            "node": "БД: пакети + diff (jsonb, set-based)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: пакети + diff (jsonb, set-based)": {
+      "main": [
+        [
+          {
+            "node": "Відповідь колектору (202 Accepted)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Відповідь колектору (202 Accepted)": {
+      "main": [
+        [
+          {
+            "node": "БД: крок 1 — точні збіги (довідник)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: крок 1 — точні збіги (довідник)": {
+      "main": [
+        [
+          {
+            "node": "БД: крок 2 — правила (dict_rules)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: крок 2 — правила (dict_rules)": {
+      "main": [
+        [
+          {
+            "node": "Довідник категорій",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Довідник категорій": {
+      "main": [
+        [
+          {
+            "node": "БД: крок 3 — невідомі (для AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: крок 3 — невідомі (для AI)": {
+      "main": [
+        [
+          {
+            "node": "Є невідомі пакети?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Є невідомі пакети?": {
+      "main": [
+        [
+          {
+            "node": "Пакетування (по 10, відсортовано)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "БД: фіналізація запуску (лічильники)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Пакетування (по 10, відсортовано)": {
+      "main": [
+        [
+          {
+            "node": "Цикл по батчах",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Цикл по батчах": {
+      "main": [
+        [
+          {
+            "node": "БД: фіналізація запуску (лічильники)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Промпт для AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Промпт для AI": {
+      "main": [
+        [
+          {
+            "node": "AI: класифікація (Basic LLM Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model (локально, GPU)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: класифікація (Basic LLM Chain)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Структурований вивід (JSON Schema)": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI: класифікація (Basic LLM Chain)",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: класифікація (Basic LLM Chain)": {
+      "main": [
+        [
+          {
+            "node": "Валідація відповіді AI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "БД: батч у чергу перевірки (AI недоступний / невалідно)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Валідація відповіді AI": {
+      "main": [
+        [
+          {
+            "node": "Відповідь валідна?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Відповідь валідна?": {
+      "main": [
+        [
+          {
+            "node": "БД: запис результатів AI (пріоритет ai=100)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "БД: батч у чергу перевірки (AI недоступний / невалідно)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: запис результатів AI (пріоритет ai=100)": {
+      "main": [
+        [
+          {
+            "node": "Цикл по батчах",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: батч у чергу перевірки (AI недоступний / невалідно)": {
+      "main": [
+        [
+          {
+            "node": "Цикл по батчах",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: фіналізація запуску (лічильники)": {
+      "main": [
+        [
+          {
+            "node": "Підсумок запуску",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "swinvErrors00001",
+    "executionTimeout": 1800
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

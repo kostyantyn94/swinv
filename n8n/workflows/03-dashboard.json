@@ -1,0 +1,230 @@
+{
+  "id": "swinvDashbrd0001",
+  "name": "SWInv · 3. Дашборд реєстру ПЗ",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "inventory/dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n001",
+      "name": "Webhook: GET /inventory/dashboard",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "swinv-inventory-dashboard-001"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_dashboard() AS d",
+        "options": {}
+      },
+      "id": "n002",
+      "name": "БД: дані дашборду (один JSON)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        260,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Рендер HTML-дашборду з одного JSON (swinv_dashboard()). Без зовнішніх залежностей — працює офлайн.\nconst d = $input.first().json.d || {};\nconst k = d.kpi || {};\nconst esc = (s) => String(s == null ? '' : s).replace(/[&<>\"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst num = (n) => (n == null ? '—' : Number(n).toLocaleString('uk-UA'));\nconst dt = (s) => { if (!s) return '—'; const x = new Date(s); return isNaN(x) ? esc(s) : x.toLocaleString('uk-UA', { hour12: false }); };\nconst pol = { allowed: ['дозволено', '#1f8a4c'], restricted: ['обмежено', '#c77700'], prohibited: ['заборонено', '#c62828'] };\nconst mt = { human: ['людина', '#6a1b9a'], rule: ['правило', '#1565c0'], exact: ['точний збіг', '#00838f'], ai: ['AI', '#ef6c00'], seed: ['сід', '#455a64'], unresolved: ['без продукту', '#9e9e9e'] };\nconst badge = (txt, color) => `<span class=\"b\" style=\"background:${color}\">${esc(txt)}</span>`;\nconst polBadge = (p) => badge((pol[p] || [p])[0], (pol[p] || ['', '#777'])[1]);\nconst mtBadge = (m) => badge((mt[m] || [m])[0], (mt[m] || ['', '#777'])[1]);\n\nconst runs = d.runs || [];\nconst runRows = runs.map((r, i) => {\n  const zero = r.ai_calls === 0 && r.dict_changes === 0 && r.added === 0 && r.changed === 0 && r.removed === 0 && r.status === 'done';\n  return `<tr class=\"${zero ? 'zero' : ''}\">\n    <td>${esc(r.id)}</td><td>${dt(r.received_at)}</td><td>${esc(r.hostname)}</td>\n    <td class=\"n\">${num(r.packages_total)}</td>\n    <td class=\"n\">${num(r.added)} / ${num(r.changed)} / ${num(r.removed)}</td>\n    <td class=\"n\">${num(r.fingerprints_total)}</td>\n    <td class=\"n\">${num(r.known_before)}</td>\n    <td class=\"n\">${num(r.resolved_rule)}</td>\n    <td class=\"n\">${num(r.resolved_ai)}</td>\n    <td class=\"n\"><b>${num(r.ai_calls)}</b></td>\n    <td class=\"n\">${num(r.unresolved)}</td>\n    <td class=\"n\"><b>${num(r.dict_changes)}</b></td>\n    <td class=\"n\">${r.duration_ms != null ? (r.duration_ms / 1000).toFixed(1) + ' с' : '—'}</td>\n    <td>${esc(r.status)}${zero ? ' · <b>0 змін</b>' : ''}</td></tr>`;\n}).join('');\n\nconst mts = d.match_types || [];\nconst mtTotal = mts.reduce((a, x) => a + Number(x.packages), 0) || 1;\nconst mtBars = mts.map(x => `<div class=\"row\"><div class=\"lbl\">${mtBadge(x.match_type)}</div>\n  <div class=\"bar\"><div style=\"width:${(100 * x.packages / mtTotal).toFixed(1)}%;background:${(mt[x.match_type] || ['', '#777'])[1]}\"></div></div>\n  <div class=\"val\">${num(x.packages)} <small>(${(100 * x.packages / mtTotal).toFixed(0)}%)</small></div></div>`).join('');\n\nconst cats = (d.categories || []).filter(c => c.packages > 0 || c.software > 0);\nconst catMax = Math.max(1, ...cats.map(c => Number(c.packages)));\nconst catBars = cats.map(c => `<div class=\"row\"><div class=\"lbl\">${esc(c.name_uk)} <small>${esc(c.code)}</small> ${polBadge(c.policy)}</div>\n  <div class=\"bar\"><div style=\"width:${(100 * c.packages / catMax).toFixed(1)}%;background:${(pol[c.policy] || ['', '#777'])[1]}\"></div></div>\n  <div class=\"val\">${num(c.software)} прод. / ${num(c.packages)} пак.</div></div>`).join('');\n\nconst viol = d.violations || [];\nconst violRows = viol.map(v => `<tr><td>${polBadge(v.policy)}</td><td><b>${esc(v.software_name)}</b></td><td>${esc(v.vendor_name || '—')}</td>\n  <td>${esc(v.category_name_uk)}</td><td>${esc(v.hostname)}</td><td class=\"n\">${num(v.package_count)}</td><td>${esc((v.versions || []).slice(0, 3).join(', '))}</td></tr>`).join('');\n\nconst top = d.top_products || [];\nconst topRows = top.map(t => `<tr><td><b>${esc(t.software_name)}</b></td><td>${esc(t.vendor_name || '—')}</td><td>${esc(t.category_code)} ${polBadge(t.policy)}</td>\n  <td class=\"n\"><b>${num(t.package_count)}</b> <small>(складових ${num(t.component_count)})</small></td><td>${(t.match_types || []).map(mtBadge).join(' ')}</td>\n  <td><small>${esc((t.versions || []).slice(0, 4).join(', '))}</small></td></tr>`).join('');\n\nconst rq = d.review || [];\nconst reasonUk = { low_confidence: 'низька впевненість', unknown_category: 'категорія поза переліком', invalid_output: 'некоректна відповідь AI', ai_unavailable: 'AI недоступний', manual: 'ручне' };\nconst rqRows = rq.map(q => `<tr><td>${esc(q.id)}</td><td><b>${esc(q.sample_name)}</b><br><small>${esc(q.sample_publisher || '—')} · ${esc(q.sample_source)}</small></td>\n  <td>${esc(q.proposed_software || '—')}<br><small>${esc(q.proposed_category || '—')}</small></td><td class=\"n\">${q.confidence != null ? Number(q.confidence).toFixed(2) : '—'}</td>\n  <td>${esc(reasonUk[q.reason] || q.reason)}</td><td>${dt(q.created_at)}</td></tr>`).join('');\n\nconst au = d.audit || [];\nconst opUk = { INSERT: 'створено', UPDATE: 'оновлено', DELETE: 'видалено', error: 'помилка' };\nconst auRows = au.map(a => `<tr><td>${dt(a.at)}</td><td>${esc(a.table_name)}</td><td>${esc(opUk[a.operation] || a.operation)}</td>\n  <td>${esc(a.subject)}</td><td>${a.match_type ? mtBadge(a.match_type) : ''} ${esc(a.category_code || '')}</td><td>${esc(a.actor)}</td></tr>`).join('');\n\nconst rules = d.rules || [];\nconst ruleRows = rules.slice(0, 15).map(r => `<tr><td>${esc(r.name)}</td><td><code>${esc(r.field)} ~* ${esc(String(r.pattern).slice(0, 60))}${String(r.pattern).length > 60 ? '…' : ''}</code></td>\n  <td>${esc(r.category_code)}</td><td>${esc(r.software_name || '<назва пакета>')}</td><td class=\"n\">${num(r.priority)}</td><td>${esc(r.origin)}</td><td class=\"n\"><b>${num(r.hit_count)}</b></td></tr>`).join('');\n\nconst src = d.sources || [];\nconst srcRows = src.map(s => `<tr><td>${esc(s.source)}</td><td class=\"n\">${num(s.packages)}</td><td class=\"n\">${num(s.mapped)}</td><td class=\"n\">${s.packages ? (100 * s.mapped / s.packages).toFixed(0) : 0}%</td></tr>`).join('');\nconst vend = (d.vendors_top || []).map(v => `<li>${esc(v.vendor)} <small>— ${num(v.software)}</small></li>`).join('');\n\nconst aiShare = (() => { const ai = mts.find(x => x.match_type === 'ai'); return ai ? (100 * ai.packages / mtTotal).toFixed(0) : '0'; })();\n\nconst html = `<!doctype html><html lang=\"uk\"><head><meta charset=\"utf-8\"><title>SWInv · Реєстр ПЗ</title>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<style>\n:root{--bg:#f4f6f9;--card:#fff;--ink:#1c2430;--mut:#66717f;--line:#e3e8ee;--acc:#0b5fff}\n*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}\nheader{background:#0f1b2d;color:#fff;padding:18px 28px;display:flex;align-items:baseline;gap:18px;flex-wrap:wrap}\nheader h1{margin:0;font-size:20px;font-weight:600}header small{color:#b8c4d6}header a{color:#9cc3ff;margin-left:auto}\nmain{padding:20px 28px;max-width:1500px;margin:0 auto}\n.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(138px,1fr));gap:12px;margin-bottom:18px}\n.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}\n.kpi .v{font-size:26px;font-weight:700;letter-spacing:-.5px}.kpi .l{color:var(--mut);font-size:12px}\n.kpi.warn .v{color:#c62828}.kpi.ok .v{color:#1f8a4c}\n.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px}\n.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto}\n.card.wide{grid-column:1/-1}.card h2{margin:0 0 10px;font-size:15px}.card h2 small{color:var(--mut);font-weight:400;margin-left:8px}\ntable{border-collapse:collapse;width:100%}th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}\nth{color:var(--mut);font-weight:600;font-size:12px;white-space:nowrap}td.n,th.n{text-align:right;white-space:nowrap}\ntr.zero td{background:#eefaf1}\n.b{display:inline-block;color:#fff;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:600;vertical-align:middle}\n.row{display:grid;grid-template-columns:minmax(200px,2fr) 3fr 130px;gap:10px;align-items:center;margin:4px 0}\n.bar{height:12px;background:#eef1f5;border-radius:6px;overflow:hidden}.bar div{height:100%;border-radius:6px}\n.val{text-align:right;white-space:nowrap}.lbl small{color:var(--mut)}\ncode{font:12px ui-monospace,Consolas,monospace;background:#f1f3f6;padding:1px 4px;border-radius:4px}\n.note{color:var(--mut);font-size:12px;margin-top:6px}ul.v{columns:2;margin:0;padding-left:18px}\n</style></head><body>\n<header><h1>SWInv · Реєстр програмного забезпечення</h1><small>n8n + PostgreSQL + локальна LLM · сформовано ${dt(d.generated_at)}</small>\n<a href=\"/form/inventory/review\">Черга перевірки →</a></header>\n<main>\n<div class=\"kpis\">\n <div class=\"kpi\"><div class=\"v\">${num(k.hosts)}</div><div class=\"l\">хостів</div></div>\n <div class=\"kpi\"><div class=\"v\">${num(k.packages)}</div><div class=\"l\">пакетів (усі джерела)</div></div>\n <div class=\"kpi\"><div class=\"v\">${num(k.software_on_hosts)}</div><div class=\"l\">продуктів на хостах</div></div>\n <div class=\"kpi ok\"><div class=\"v\">${num(k.coverage_pct)}%</div><div class=\"l\">пакетів зіставлено з продуктом</div></div>\n <div class=\"kpi\"><div class=\"v\">${aiShare}%</div><div class=\"l\">частка рішень AI (решта — довідник/правила/людина)</div></div>\n <div class=\"kpi ${k.violations > 0 ? 'warn' : 'ok'}\"><div class=\"v\">${num(k.violations)}</div><div class=\"l\">заборонених продуктів</div></div>\n <div class=\"kpi\"><div class=\"v\">${num(k.restricted)}</div><div class=\"l\">обмежених продуктів</div></div>\n <div class=\"kpi ${k.review_open > 0 ? 'warn' : 'ok'}\"><div class=\"v\">${num(k.review_open)}</div><div class=\"l\">у черзі перевірки</div></div>\n <div class=\"kpi\"><div class=\"v\">${num(k.software)} / ${num(k.vendors)} / ${num(k.rules)}</div><div class=\"l\">довідники: продуктів / вендорів / правил</div></div>\n</div>\n<div class=\"grid\">\n <div class=\"card wide\"><h2>Запуски інвентаризації <small>доказ прогнозованості: повторний запуск → 0 звернень до AI, 0 змін довідників</small></h2>\n  <table><thead><tr><th>#</th><th>Отримано</th><th>Хост</th><th class=\"n\">Пакетів</th><th class=\"n\">нових / змін. / видал.</th><th class=\"n\">Відбитків</th><th class=\"n\">Відомі до запуску</th><th class=\"n\">Правила</th><th class=\"n\">AI</th><th class=\"n\">Звернень до AI</th><th class=\"n\">Без продукту</th><th class=\"n\">Змін довідників</th><th class=\"n\">Час</th><th>Статус</th></tr></thead>\n  <tbody>${runRows || '<tr><td colspan=\"14\">Запусків ще не було — запустіть collector/Collect-Inventory.ps1</td></tr>'}</tbody></table></div>\n <div class=\"card\"><h2>Хто прийняв рішення <small>по пакетах</small></h2>${mtBars || '<div class=\"note\">немає даних</div>'}\n  <div class=\"note\">Пріоритети запису в довідник: людина 400 › правило 300 › точний збіг 200 › AI 100. Нижчий ніколи не перезаписує вищий.</div></div>\n <div class=\"card\"><h2>Категорії <small>закрита таксономія · політика банку</small></h2>${catBars || '<div class=\"note\">немає даних</div>'}</div>\n <div class=\"card wide\"><h2>Порушення політики <small>заборонене та обмежене ПЗ на хостах</small></h2>\n  <table><thead><tr><th>Політика</th><th>Продукт</th><th>Вендор</th><th>Категорія</th><th>Хост</th><th class=\"n\">Пакетів</th><th>Версії</th></tr></thead>\n  <tbody>${violRows || '<tr><td colspan=\"7\">Порушень не виявлено</td></tr>'}</tbody></table></div>\n <div class=\"card wide\"><h2>Продукти з найбільшою кількістю пакетів <small>згортання «пакети → продукт»</small></h2>\n  <table><thead><tr><th>Продукт</th><th>Вендор</th><th>Категорія</th><th class=\"n\">Пакетів</th><th>Рішення</th><th>Версії</th></tr></thead><tbody>${topRows}</tbody></table></div>\n <div class=\"card wide\"><h2>Черга перевірки людиною <small>${num(k.review_open)} відкритих · <a href=\"/form/inventory/review\">відкрити форму</a></small></h2>\n  <table><thead><tr><th>#</th><th>Пакет</th><th>Пропозиція AI</th><th class=\"n\">Впевн.</th><th>Причина</th><th>Створено</th></tr></thead>\n  <tbody>${rqRows || '<tr><td colspan=\"6\">Черга порожня</td></tr>'}</tbody></table></div>\n <div class=\"card\"><h2>Правила зіставлення <small>топ за спрацюваннями</small></h2>\n  <table><thead><tr><th>Правило</th><th>Умова</th><th>Категорія</th><th>Продукт</th><th class=\"n\">Пріор.</th><th>Джерело</th><th class=\"n\">Спрацювань</th></tr></thead><tbody>${ruleRows}</tbody></table></div>\n <div class=\"card\"><h2>Журнал аудиту довідників <small>останні 20 змін (тригер БД)</small></h2>\n  <table><thead><tr><th>Коли</th><th>Таблиця</th><th>Дія</th><th>Об'єкт</th><th>Деталі</th><th>Актор</th></tr></thead><tbody>${auRows || '<tr><td colspan=\"6\">порожньо</td></tr>'}</tbody></table></div>\n <div class=\"card\"><h2>Джерела даних</h2><table><thead><tr><th>Джерело</th><th class=\"n\">Пакетів</th><th class=\"n\">Зіставлено</th><th class=\"n\">%</th></tr></thead><tbody>${srcRows}</tbody></table></div>\n <div class=\"card\"><h2>Вендори <small>за кількістю продуктів</small></h2><ul class=\"v\">${vend}</ul></div>\n</div>\n<p class=\"note\">SWInv · дані не залишають периметр: класифікацію виконує локальна модель (Ollama, GPU). JSON API: <code>/webhook/inventory/api/dashboard</code></p>\n</main></body></html>`;\nreturn [{ json: { html } }];\n"
+      },
+      "id": "n003",
+      "name": "Рендер HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n004",
+      "name": "HTML-відповідь",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "inventory/api/dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "n005",
+      "name": "Webhook: GET /inventory/api/dashboard",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        520
+      ],
+      "webhookId": "swinv-inventory-dashboard-api1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT swinv_dashboard() AS d",
+        "options": {}
+      },
+      "id": "n006",
+      "name": "БД: дані дашборду (JSON API)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        260,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "swinvPostgres01",
+          "name": "SWInv Postgres (inventory)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.d) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "n007",
+      "name": "JSON-відповідь",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        520,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Дашборд реєстру ПЗ\nОдин виклик `swinv_dashboard()` → один JSON → HTML без зовнішніх залежностей (працює офлайн).\nHTML: /webhook/inventory/dashboard · JSON: /webhook/inventory/api/dashboard",
+        "height": 120,
+        "width": 820,
+        "color": 3
+      },
+      "id": "n009",
+      "name": "Note n008",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: GET /inventory/dashboard": {
+      "main": [
+        [
+          {
+            "node": "БД: дані дашборду (один JSON)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: дані дашборду (один JSON)": {
+      "main": [
+        [
+          {
+            "node": "Рендер HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Рендер HTML": {
+      "main": [
+        [
+          {
+            "node": "HTML-відповідь",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: GET /inventory/api/dashboard": {
+      "main": [
+        [
+          {
+            "node": "БД: дані дашборду (JSON API)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "БД: дані дашборду (JSON API)": {
+      "main": [
+        [
+          {
+            "node": "JSON-відповідь",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "swinvErrors00001"
+  },
+  "active": false,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

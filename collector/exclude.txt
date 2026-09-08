@@ -1,0 +1,10 @@
+# SWInv collector — privacy / scope filter (both collectors read this file and exclude.local.txt next to it).
+# One case-insensitive regular expression per line; matched against "<name> | <publisher> | <install_location>".
+# Matching packages are NOT collected and never leave the machine (the count of excluded items is reported).
+# Typical use: personal software on BYOD devices, vendor test builds, internal tools out of scope.
+# Lines starting with # are comments. Keep private patterns in exclude.local.txt (git-ignored).
+#
+# Examples:
+# ^My Private Tool
+# \| Personal Publisher Ltd \|
+# steamapps\common\SomeGame
