@@ -7,8 +7,13 @@
 - **Прогнозованість, яку видно.** Повторний запуск на тому ж ПК: 0 нових / 0 змінених / 0 видалених, 0 звернень до AI, 0 змін довідників — рядок підсвічено зеленим на дашборді.
 - **Довідники живуть у БД і оновлюються за правилами.** Пріоритети рішень human 400 › seed 350 › rule 300 › exact 200 › ai 100, upsert із захистом від пониження, аудит кожної зміни тригером БД, рішення людини перетворюються на правила.
 - **On-prem за замовчуванням.** qwen2.5:14b на локальній GPU, temperature 0, JSON-режим; дані не залишають машину. Перехід на хмарну модель — одна нода на канвасі (вже стоїть поруч, вимкнена).
+- **Парк ПК, а не один хост.** Windows- і Linux/macOS-колектори з одним контрактом, спільні довідники; дашборд має перемикач хостів, таблицю парку і блок «що змінилось на хості за останній збір».
 
 ![Дашборд SWInv](docs/dashboard.png)
+
+Парк із двох хостів (Windows + Linux-контейнер) на одному дашборді зі спільними довідниками:
+
+![Дашборд SWInv: парк хостів](docs/dashboard-hosts.png)
 
 ---
 
@@ -95,8 +100,8 @@ GPU для Ollama вмикається окремим файлом `docker-compo
 | Що | URL |
 |---|---|
 | Редактор n8n | http://localhost:5678 — логін `admin@swinv.local`, пароль у `.env` (`N8N_OWNER_PASSWORD`) |
-| Дашборд (HTML) | http://localhost:5678/webhook/inventory/dashboard |
-| Дашборд (JSON API) | http://localhost:5678/webhook/inventory/api/dashboard |
+| Дашборд (HTML) | http://localhost:5678/webhook/inventory/dashboard — увесь парк; `?host=<id>` — один ПК із блоком змін за останній збір |
+| Дашборд (JSON API) | http://localhost:5678/webhook/inventory/api/dashboard (той самий параметр `host`) |
 | Форма перевірки | http://localhost:5678/form/inventory/review |
 | Ollama API | http://localhost:11434 |
 | PostgreSQL | `localhost:5432`, користувач/пароль з `.env`, БД `inventory` |

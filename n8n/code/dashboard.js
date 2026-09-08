@@ -70,6 +70,27 @@ const vend = (d.vendors_top || []).map(v => `<li>${esc(v.vendor)} <small>— ${n
 
 const aiShare = (() => { const ai = mts.find(x => x.match_type === 'ai'); return ai ? (100 * ai.packages / mtTotal).toFixed(0) : '0'; })();
 
+// ---- парк ПК: селектор хоста, таблиця хостів, зміни за останній збір обраного хоста
+const hosts = d.hosts || [];
+const hostFilter = d.host_filter;
+const host = d.host || null;
+const scopeLabel = host ? `хост ${esc(host.hostname)}` : 'усі хости';
+const hostNav = `<nav class="hosts"><a class="${hostFilter ? '' : 'on'}" href="?">Усі хости <small>(${hosts.length})</small></a>` +
+  hosts.map(h => `<a class="${String(h.id) === String(hostFilter) ? 'on' : ''}" href="?host=${h.id}">${esc(h.hostname)}<small> · ${esc((h.os_name || '').split(' ').slice(0, 3).join(' '))}</small></a>`).join('') + `</nav>`;
+const hostRows = hosts.map(h => { const lr = h.last_run || {}; const zero = lr.status === 'done' && lr.ai_calls === 0 && lr.dict_changes === 0 && lr.added === 0 && lr.changed === 0 && lr.removed === 0;
+  return `<tr class="${String(h.id) === String(hostFilter) ? 'sel' : ''}"><td><a href="?host=${h.id}"><b>${esc(h.hostname)}</b></a></td><td>${esc(h.os_name || '—')}</td><td>${esc(h.last_user || '—')}</td>
+  <td>${dt(h.last_seen)}</td><td class="n">${num(h.packages)}</td><td class="n">${num(h.software)}</td>
+  <td class="n" style="color:${h.prohibited > 0 ? '#c62828' : 'inherit'}"><b>${num(h.prohibited)}</b></td><td class="n">${num(h.restricted)}</td><td class="n">${num(h.unresolved)}</td>
+  <td>${lr.status ? esc(lr.status) : '—'}${zero ? ' · <b>0 змін</b>' : ''}${lr.status ? ` <small>(+${num(lr.added)} / ~${num(lr.changed)} / −${num(lr.removed)}, AI ${num(lr.ai_calls)})</small>` : ''}</td></tr>`; }).join('');
+const ch = d.changes || null;
+const chList = (arr, cls) => (arr || []).map(p => `<li class="${cls}">${esc(p.name)} <small>${esc(p.version_prev ? (p.version_prev + ' → ' + (p.version || '')) : (p.version || ''))} · ${esc(p.source)}${p.publisher ? ' · ' + esc(p.publisher) : ''}</small></li>`).join('');
+const changesCard = host && ch ? `<div class="card wide"><h2>Зміни на хості за останній збір <small>${dt(ch.received_at)} · ${esc(host.os_name || '')} · ${esc(host.manufacturer || '')} ${esc(host.model || '')}</small></h2>
+  <div class="cols">
+   <div><h3>Нові <small>${num((ch.added || []).length)}</small></h3><ul class="chg">${chList(ch.added, 'add') || '<li class="mut">немає</li>'}</ul></div>
+   <div><h3>Змінили версію <small>${num((ch.changed || []).length)}</small></h3><ul class="chg">${chList(ch.changed, 'chg') || '<li class="mut">немає</li>'}</ul></div>
+   <div><h3>Зникли <small>${num((ch.removed || []).length)}</small></h3><ul class="chg">${chList(ch.removed, 'del') || '<li class="mut">немає</li>'}</ul></div>
+  </div><div class="note">Показано до 40 записів у кожній колонці. Зниклі пакети лишаються в історії (present = false), рішення довідника зберігаються.</div></div>` : '';
+
 const html = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><title>SWInv · Реєстр ПЗ</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -94,14 +115,19 @@ tr.zero td{background:#eefaf1}
 .val{text-align:right;white-space:nowrap}.lbl small{color:var(--mut)}
 code{font:12px ui-monospace,Consolas,monospace;background:#f1f3f6;padding:1px 4px;border-radius:4px}
 .note{color:var(--mut);font-size:12px;margin-top:6px}ul.v{columns:2;margin:0;padding-left:18px}
+nav.hosts{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}nav.hosts a{display:inline-block;padding:6px 12px;border:1px solid var(--line);border-radius:20px;background:var(--card);color:var(--ink);text-decoration:none;font-size:13px}
+nav.hosts a.on{background:#0f1b2d;color:#fff;border-color:#0f1b2d}nav.hosts a small{color:inherit;opacity:.7}
+tr.sel td{background:#eef3ff}.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.cols h3{margin:4px 0 6px;font-size:13px}.cols h3 small{color:var(--mut);font-weight:400}
+ul.chg{margin:0;padding-left:16px;max-height:320px;overflow:auto}ul.chg li{margin:2px 0}ul.chg li small{color:var(--mut)}li.add{color:#1f8a4c}li.del{color:#c62828}li.chg{color:#c77700}li.mut{color:var(--mut);list-style:none;margin-left:-16px}
 </style></head><body>
-<header><h1>SWInv · Реєстр програмного забезпечення</h1><small>n8n + PostgreSQL + локальна LLM · сформовано ${dt(d.generated_at)}</small>
+<header><h1>SWInv · Реєстр програмного забезпечення</h1><small>n8n + PostgreSQL + локальна LLM · сформовано ${dt(d.generated_at)} · ${scopeLabel}</small>
 <a href="/form/inventory/review">Черга перевірки →</a></header>
 <main>
+${hostNav}
 <div class="kpis">
- <div class="kpi"><div class="v">${num(k.hosts)}</div><div class="l">хостів</div></div>
- <div class="kpi"><div class="v">${num(k.packages)}</div><div class="l">пакетів (усі джерела)</div></div>
- <div class="kpi"><div class="v">${num(k.software_on_hosts)}</div><div class="l">продуктів на хостах</div></div>
+ <div class="kpi"><div class="v">${num(k.hosts)}</div><div class="l">хостів у реєстрі</div></div>
+ <div class="kpi"><div class="v">${num(k.packages)}</div><div class="l">пакетів (${host ? 'цей хост' : 'усі хости'})</div></div>
+ <div class="kpi"><div class="v">${num(k.software_on_hosts)}</div><div class="l">продуктів ${host ? 'на хості' : 'на хостах'}</div></div>
  <div class="kpi ok"><div class="v">${num(k.coverage_pct)}%</div><div class="l">пакетів зіставлено з продуктом</div></div>
  <div class="kpi"><div class="v">${aiShare}%</div><div class="l">частка рішень AI (решта — довідник/правила/людина)</div></div>
  <div class="kpi ${k.violations > 0 ? 'warn' : 'ok'}"><div class="v">${num(k.violations)}</div><div class="l">заборонених продуктів</div></div>
@@ -110,6 +136,10 @@ code{font:12px ui-monospace,Consolas,monospace;background:#f1f3f6;padding:1px 4p
  <div class="kpi"><div class="v">${num(k.software)} / ${num(k.vendors)} / ${num(k.rules)}</div><div class="l">довідники: продуктів / вендорів / правил</div></div>
 </div>
 <div class="grid">
+ <div class="card wide"><h2>Хости <small>парк ПК: клік по хосту відкриває його реєстр; довідники, правила та черга перевірки спільні для всіх</small></h2>
+  <table><thead><tr><th>Хост</th><th>ОС</th><th>Користувач</th><th>Останній збір</th><th class="n">Пакетів</th><th class="n">Продуктів</th><th class="n">Заборонених</th><th class="n">Обмежених</th><th class="n">Без продукту</th><th>Останній запуск</th></tr></thead>
+  <tbody>${hostRows || '<tr><td colspan="10">Хостів ще немає</td></tr>'}</tbody></table></div>
+ ${changesCard}
  <div class="card wide"><h2>Запуски інвентаризації <small>доказ прогнозованості: повторний запуск → 0 звернень до AI, 0 змін довідників</small></h2>
   <table><thead><tr><th>#</th><th>Отримано</th><th>Хост</th><th class="n">Пакетів</th><th class="n">нових / змін. / видал.</th><th class="n">Відбитків</th><th class="n">Відомі до запуску</th><th class="n">Правила</th><th class="n">AI</th><th class="n">Звернень до AI</th><th class="n">Без продукту</th><th class="n">Змін довідників</th><th class="n">Час</th><th>Статус</th></tr></thead>
   <tbody>${runRows || '<tr><td colspan="14">Запусків ще не було — запустіть collector/Collect-Inventory.ps1</td></tr>'}</tbody></table></div>

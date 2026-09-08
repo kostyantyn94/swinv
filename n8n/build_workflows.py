@@ -507,7 +507,7 @@ def build_dashboard():
     n_wh = node('Webhook: GET /inventory/dashboard', 'n8n-nodes-base.webhook', 2.1,
                 {"httpMethod": "GET", "path": "inventory/dashboard", "responseMode": "responseNode", "options": {}},
                 0, Y, webhookId="swinv-inventory-dashboard-001")
-    n_data = pg('БД: дані дашборду (один JSON)', "SELECT swinv_dashboard() AS d", None, 260, Y)
+    n_data = pg('БД: дані дашборду (один JSON)', "SELECT swinv_dashboard($1::int) AS d", r"={{ [ ($json.query && $json.query.host && /^\d+$/.test(String($json.query.host))) ? Number($json.query.host) : null ] }}", 260, Y)
     n_render = code('Рендер HTML', JS_RENDER, 520, Y)
     n_resp = node('HTML-відповідь', 'n8n-nodes-base.respondToWebhook', 1.5,
                   {"respondWith": "text", "responseBody": "={{ $json.html }}",
@@ -516,13 +516,13 @@ def build_dashboard():
     n_wh2 = node('Webhook: GET /inventory/api/dashboard', 'n8n-nodes-base.webhook', 2.1,
                  {"httpMethod": "GET", "path": "inventory/api/dashboard", "responseMode": "responseNode", "options": {}},
                  0, Y + 220, webhookId="swinv-inventory-dashboard-api1")
-    n_data2 = pg('БД: дані дашборду (JSON API)', "SELECT swinv_dashboard() AS d", None, 260, Y + 220)
+    n_data2 = pg('БД: дані дашборду (JSON API)', "SELECT swinv_dashboard($1::int) AS d", r"={{ [ ($json.query && $json.query.host && /^\d+$/.test(String($json.query.host))) ? Number($json.query.host) : null ] }}", 260, Y + 220)
     n_resp2 = node('JSON-відповідь', 'n8n-nodes-base.respondToWebhook', 1.5,
                    {"respondWith": "json", "responseBody": "={{ JSON.stringify($json.d) }}",
                     "options": {"responseHeaders": {"entries": [{"name": "Content-Type", "value": "application/json; charset=utf-8"}]}}},
                    520, Y + 220)
     nodes += [n_wh, n_data, n_render, n_resp, n_wh2, n_data2, n_resp2]
-    nodes.append(sticky("## Дашборд реєстру ПЗ\nОдин виклик `swinv_dashboard()` → один JSON → HTML без зовнішніх залежностей (працює офлайн).\nHTML: /webhook/inventory/dashboard · JSON: /webhook/inventory/api/dashboard", -40, Y - 200, 820, 120, 3))
+    nodes.append(sticky("## Дашборд реєстру ПЗ\nОдин виклик `swinv_dashboard()` → один JSON → HTML без зовнішніх залежностей (працює офлайн).\nHTML: /webhook/inventory/dashboard (?host=<id> — один хост) · JSON: /webhook/inventory/api/dashboard", -40, Y - 200, 820, 120, 3))
     c = conns
     connect(c, n_wh['name'], n_data['name'])
     connect(c, n_data['name'], n_render['name'])

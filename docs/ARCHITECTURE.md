@@ -84,7 +84,7 @@ X-Inventory-Token: <INVENTORY_WEBHOOK_TOKEN>
 | `swinv_ai_failed(run_id, host_id, batch jsonb, reason, error)` | Батч у чергу з `ai_unavailable` / `invalid_output`; `ai_batches_failed`; запуск не падає |
 | `swinv_finalize_run(run_id)` | `unresolved`, `dict_changes` (= рядків аудиту з цим `run_id`), `duration_ms`, статус `done`, підсумковий JSON |
 | `swinv_apply_human_decision(review_id, software, vendor, category, is_component, create_rule, actor)` | Рішення людини: продукт (може змінити категорію), зіставлення `human=400`, опційне правило `^назва$` з `priority 500`/`origin human`, закриття записів черги з цим відбитком |
-| `swinv_dashboard()` | Один JSON для дашборду: KPI, 12 останніх запусків, розподіл рішень, категорії з політиками, порушення, топ продуктів, черга, аудит, правила, джерела, вендори |
+| `swinv_dashboard(p_host_id int DEFAULT NULL)` | Один JSON для дашборду (NULL — увесь парк, інакше один хост; довідники, черга й аудит завжди спільні): перелік хостів із підсумками, зміни обраного хоста за останній збір, KPI, 12 останніх запусків, розподіл рішень, категорії з політиками, порушення, топ продуктів, черга, аудит, правила, джерела, вендори |
 
 Подання: `v_inventory_current` → `v_software_by_host` → `v_policy_violations` (`policy IN ('prohibited','restricted')`, з урахуванням `dict_software.policy_override`).
 
@@ -157,7 +157,7 @@ sequenceDiagram
         end
     end
     W->>DB: swinv_finalize_run() → status done, dict_changes, duration_ms
-    U->>DB: swinv_dashboard() — HTML / JSON
+    U->>DB: swinv_dashboard(host_id?) — HTML / JSON
     U->>DB: swinv_apply_human_decision() — human=400, правило 500, аудит
 ```
 

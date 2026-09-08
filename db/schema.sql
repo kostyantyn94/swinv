@@ -696,44 +696,73 @@ CREATE VIEW v_policy_violations AS
 SELECT * FROM v_software_by_host WHERE policy IN ('prohibited','restricted');
 
 -- ---------------------------------------------------------------------
--- 7. ДАШБОРД: один виклик -> один JSON
+-- 7. ДАШБОРД: один виклик -> один JSON. p_host_id = NULL -> увесь парк, інакше один хост
+--    (довідники, черга перевірки, правила та аудит завжди спільні)
 -- ---------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION swinv_dashboard() RETURNS jsonb LANGUAGE sql STABLE AS $$
+DROP FUNCTION IF EXISTS swinv_dashboard();
+CREATE OR REPLACE FUNCTION swinv_dashboard(p_host_id int DEFAULT NULL) RETURNS jsonb LANGUAGE sql STABLE AS $$
 SELECT jsonb_build_object(
   'generated_at', now(),
+  'host_filter', p_host_id,
+  'host', (SELECT to_jsonb(h) FROM (
+      SELECT id, hostname, domain, os_name, os_version, os_arch, last_user, manufacturer, model, first_seen, last_seen
+      FROM inventory_hosts WHERE id = p_host_id) h),
+  'hosts', (SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY x.hostname), '[]'::jsonb) FROM (
+      SELECT h.id, h.hostname, h.os_name, h.last_user, h.last_seen,
+             (SELECT count(*) FROM inventory_packages p WHERE p.host_id = h.id AND p.present) AS packages,
+             (SELECT count(DISTINCT s.software_id) FROM v_software_by_host s WHERE s.host_id = h.id) AS software,
+             (SELECT count(*) FROM v_policy_violations v WHERE v.host_id = h.id AND v.policy = 'prohibited') AS prohibited,
+             (SELECT count(*) FROM v_policy_violations v WHERE v.host_id = h.id AND v.policy = 'restricted') AS restricted,
+             (SELECT count(DISTINCT p.fingerprint) FROM inventory_packages p WHERE p.host_id = h.id AND p.present
+                 AND NOT EXISTS (SELECT 1 FROM dict_package_map m WHERE m.fingerprint = p.fingerprint)) AS unresolved,
+             (SELECT to_jsonb(r) FROM (SELECT r.status, r.received_at, r.added, r.changed, r.removed, r.ai_calls, r.dict_changes
+                                        FROM inventory_runs r WHERE r.host_id = h.id ORDER BY r.received_at DESC LIMIT 1) r) AS last_run
+      FROM inventory_hosts h) x),
   'kpi', (SELECT jsonb_build_object(
       'hosts', (SELECT count(*) FROM inventory_hosts),
-      'packages', (SELECT count(*) FROM inventory_packages WHERE present),
-      'fingerprints', (SELECT count(DISTINCT fingerprint) FROM inventory_packages WHERE present),
+      'packages', (SELECT count(*) FROM inventory_packages WHERE present AND (p_host_id IS NULL OR host_id = p_host_id)),
+      'fingerprints', (SELECT count(DISTINCT fingerprint) FROM inventory_packages WHERE present AND (p_host_id IS NULL OR host_id = p_host_id)),
       'software', (SELECT count(*) FROM dict_software),
-      'software_on_hosts', (SELECT count(DISTINCT software_id) FROM v_software_by_host),
+      'software_on_hosts', (SELECT count(DISTINCT software_id) FROM v_software_by_host WHERE (p_host_id IS NULL OR host_id = p_host_id)),
       'vendors', (SELECT count(*) FROM dict_vendor),
       'rules', (SELECT count(*) FROM dict_rules WHERE enabled),
       'categories', (SELECT count(*) FROM dict_category),
       'mapped_fingerprints', (SELECT count(*) FROM dict_package_map),
       'review_open', (SELECT count(*) FROM review_queue WHERE status = 'open'),
-      'violations', (SELECT count(*) FROM v_policy_violations WHERE policy = 'prohibited'),
-      'restricted', (SELECT count(*) FROM v_policy_violations WHERE policy = 'restricted'),
-      'coverage_pct', (SELECT round(100.0 * count(*) FILTER (WHERE software_id IS NOT NULL) / greatest(count(*),1), 1) FROM v_inventory_current)
+      'violations', (SELECT count(*) FROM v_policy_violations WHERE policy = 'prohibited' AND (p_host_id IS NULL OR host_id = p_host_id)),
+      'restricted', (SELECT count(*) FROM v_policy_violations WHERE policy = 'restricted' AND (p_host_id IS NULL OR host_id = p_host_id)),
+      'coverage_pct', (SELECT round(100.0 * count(*) FILTER (WHERE software_id IS NOT NULL) / greatest(count(*),1), 1)
+                       FROM v_inventory_current WHERE (p_host_id IS NULL OR host_id = p_host_id))
   )),
   'runs', (SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY r.received_at DESC), '[]'::jsonb) FROM (
-      SELECT ir.id, ir.run_id, h.hostname, ir.received_at, ir.finished_at, ir.status, ir.packages_total, ir.added, ir.changed, ir.removed,
+      SELECT ir.id, ir.run_id, ir.host_id, h.hostname, ir.received_at, ir.finished_at, ir.status, ir.packages_total, ir.added, ir.changed, ir.removed,
              ir.fingerprints_total, ir.known_before, ir.resolved_exact, ir.resolved_rule, ir.resolved_ai, ir.unresolved,
              ir.ai_calls, ir.ai_packages, ir.ai_batches_failed, ir.dict_changes, ir.duration_ms
-      FROM inventory_runs ir JOIN inventory_hosts h ON h.id = ir.host_id ORDER BY ir.received_at DESC LIMIT 12) r),
+      FROM inventory_runs ir JOIN inventory_hosts h ON h.id = ir.host_id
+      WHERE (p_host_id IS NULL OR ir.host_id = p_host_id) ORDER BY ir.received_at DESC LIMIT 12) r),
+  'changes', (SELECT jsonb_build_object('run_id', r.run_id, 'received_at', r.received_at,
+      'added', (SELECT coalesce(jsonb_agg(jsonb_build_object('name', p.name, 'version', p.version, 'source', p.source, 'publisher', p.publisher) ORDER BY p.name), '[]'::jsonb)
+                FROM (SELECT * FROM inventory_packages p WHERE p.host_id = r.host_id AND p.present AND p.first_run_id = r.run_id ORDER BY p.name LIMIT 40) p),
+      'removed', (SELECT coalesce(jsonb_agg(jsonb_build_object('name', p.name, 'version', p.version, 'source', p.source, 'publisher', p.publisher) ORDER BY p.name), '[]'::jsonb)
+                FROM (SELECT * FROM inventory_packages p WHERE p.host_id = r.host_id AND NOT p.present AND p.last_run_id = r.run_id ORDER BY p.name LIMIT 40) p),
+      'changed', (SELECT coalesce(jsonb_agg(jsonb_build_object('name', p.name, 'version', p.version, 'version_prev', p.version_prev, 'source', p.source) ORDER BY p.name), '[]'::jsonb)
+                FROM (SELECT * FROM inventory_packages p WHERE p.host_id = r.host_id AND p.present AND p.last_run_id = r.run_id
+                      AND p.changed_at IS NOT NULL AND p.changed_at >= r.received_at ORDER BY p.name LIMIT 40) p))
+      FROM inventory_runs r WHERE r.host_id = p_host_id ORDER BY r.received_at DESC LIMIT 1),
   'match_types', (SELECT coalesce(jsonb_agg(jsonb_build_object('match_type', mt, 'packages', n) ORDER BY n DESC), '[]'::jsonb) FROM (
-      SELECT coalesce(match_type, 'unresolved') mt, count(*) n FROM v_inventory_current GROUP BY 1) x),
+      SELECT coalesce(match_type, 'unresolved') mt, count(*) n FROM v_inventory_current WHERE (p_host_id IS NULL OR host_id = p_host_id) GROUP BY 1) x),
   'categories', (SELECT coalesce(jsonb_agg(jsonb_build_object('code', c.code, 'name_uk', c.name_uk, 'policy', c.policy,
                         'software', coalesce(s.n_sw,0), 'packages', coalesce(s.n_pk,0)) ORDER BY coalesce(s.n_pk,0) DESC, c.sort_order), '[]'::jsonb)
       FROM dict_category c LEFT JOIN (
-          SELECT category_code, count(DISTINCT software_id) n_sw, count(*) n_pk FROM v_inventory_current WHERE software_id IS NOT NULL GROUP BY 1) s
+          SELECT category_code, count(DISTINCT software_id) n_sw, count(*) n_pk FROM v_inventory_current
+          WHERE software_id IS NOT NULL AND (p_host_id IS NULL OR host_id = p_host_id) GROUP BY 1) s
       ON s.category_code = c.code),
   'violations', (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.policy, v.software_name), '[]'::jsonb) FROM (
-      SELECT hostname, software_name, vendor_name, category_code, category_name_uk, policy, package_count, versions
-      FROM v_policy_violations ORDER BY policy, software_name LIMIT 60) v),
+      SELECT host_id, hostname, software_name, vendor_name, category_code, category_name_uk, policy, package_count, versions
+      FROM v_policy_violations WHERE (p_host_id IS NULL OR host_id = p_host_id) ORDER BY policy, software_name LIMIT 80) v),
   'top_products', (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.package_count DESC), '[]'::jsonb) FROM (
-      SELECT hostname, software_name, vendor_name, category_code, policy, package_count, component_count, versions, match_types
-      FROM v_software_by_host ORDER BY package_count DESC, software_name LIMIT 15) t),
+      SELECT host_id, hostname, software_name, vendor_name, category_code, policy, package_count, component_count, versions, match_types
+      FROM v_software_by_host WHERE (p_host_id IS NULL OR host_id = p_host_id) ORDER BY package_count DESC, software_name LIMIT 15) t),
   'review', (SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY q.created_at DESC), '[]'::jsonb) FROM (
       SELECT id, sample_name, sample_publisher, sample_source, proposed_software, proposed_category, confidence, reason, created_at
       FROM review_queue WHERE status = 'open' ORDER BY created_at DESC LIMIT 25) q),
@@ -746,8 +775,10 @@ SELECT jsonb_build_object(
       SELECT id, name, field, pattern, category_code, software_name, priority, origin, hit_count, last_hit_at
       FROM dict_rules WHERE enabled ORDER BY hit_count DESC, id LIMIT 30) r),
   'sources', (SELECT coalesce(jsonb_agg(jsonb_build_object('source', source, 'packages', n, 'mapped', m) ORDER BY n DESC), '[]'::jsonb) FROM (
-      SELECT source, count(*) n, count(*) FILTER (WHERE software_id IS NOT NULL) m FROM v_inventory_current GROUP BY 1) s),
+      SELECT source, count(*) n, count(*) FILTER (WHERE software_id IS NOT NULL) m FROM v_inventory_current
+      WHERE (p_host_id IS NULL OR host_id = p_host_id) GROUP BY 1) s),
   'vendors_top', (SELECT coalesce(jsonb_agg(jsonb_build_object('vendor', vendor_name, 'software', n) ORDER BY n DESC), '[]'::jsonb) FROM (
-      SELECT coalesce(vendor_name,'—') vendor_name, count(DISTINCT software_id) n FROM v_software_by_host GROUP BY 1 ORDER BY n DESC LIMIT 12) v)
+      SELECT coalesce(vendor_name,'—') vendor_name, count(DISTINCT software_id) n FROM v_software_by_host
+      WHERE (p_host_id IS NULL OR host_id = p_host_id) GROUP BY 1 ORDER BY n DESC LIMIT 12) v)
 )
 $$;
