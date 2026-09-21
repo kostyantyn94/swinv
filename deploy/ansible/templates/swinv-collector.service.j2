@@ -1,0 +1,30 @@
+# {{ ansible_managed }}
+# SWInv collector - one shot, started by swinv-collector.timer.
+# Option names match collector/collect-inventory.sh exactly:
+#   --quiet  --webhook-url URL  --token SECRET  --out FILE  [--sources a,b,c]
+# There is no --no-upload here on purpose: the whole point is to POST the payload to n8n.
+[Unit]
+Description=SWInv software inventory collection
+Documentation=https://github.com/kostyantyn94/swinv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Webhook URL and token live here (mode 0600, root). Note: after systemd expands ${SWINV_TOKEN}
+# the secret is visible in the process command line (ps aux) - see the token section of deploy/README.md.
+EnvironmentFile=/etc/swinv/collector.env
+ExecStart={{ swinv_dir }}/collect-inventory.sh --quiet --webhook-url ${SWINV_WEBHOOK_URL} --token ${SWINV_TOKEN} --out ${SWINV_OUT_FILE}{% if swinv_sources | length > 0 %} --sources {{ swinv_sources }}{% endif %}
+
+# Exit codes of the collector: 0 ok, 1 nothing collected, 2 upload failed (the JSON is still written).
+# 2 is not a host problem (n8n or the network was down); the timer retries on the next tick.
+SuccessExitStatus=0 2
+TimeoutStartSec=1800
+# Be polite on a workstation: the collection is background housekeeping.
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

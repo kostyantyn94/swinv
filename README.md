@@ -83,6 +83,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\collector\Collect-Inventor
 
 Параметри колектора: `-WebhookUrl` (типово `http://localhost:5678/webhook/inventory/ingest`), `-Token` (типово з `.env` → `INVENTORY_WEBHOOK_TOKEN`), `-OutFile`, `-NoUpload`, `-Sources registry,appx,…`, `-Quiet`. Коди виходу: 0 — ок, 1 — не зібрано жодного пакета, 2 — не вдалося надіслати (файл усе одно записано в `samples/inventory-<host>-<timestamp>.json`).
 
+**Розгортання на парк ПК.** Агента ставити не треба: на робочих станціях колектор запускається як
+завдання за розкладом (щодня, з випадковою затримкою до 60 хв, з «наздоганянням» вимкнених машин).
+Готові артефакти — у `deploy\` (детально: `deploy/README.md` — GPO/Intune, Ansible, токени, межі прототипу).
+
+```powershell
+# Windows: Scheduled Task для колектора (повторний запуск замінює завдання; -Uninstall знімає)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy\windows\Install-SWInvTask.ps1 -CollectorPath \\fs01\swinv$\Collect-Inventory.ps1 -WebhookUrl http://n8n.corp.local:5678/webhook/inventory/ingest -Token <INVENTORY_WEBHOOK_TOKEN>
+```
+
+```bash
+# Linux: bash-колектор у /opt/swinv + systemd timer на групу [workstations]
+ansible-playbook -i inventory.ini deploy/ansible/deploy-collector.yml
+```
+
 **Межі збору (exclude-списки).** Обидва колектори читають `collector/exclude.txt` і, за наявності, локальний `collector/exclude.local.txt` (локальні файли `*.local.*` не комітяться): один регулярний вираз на рядок, збіг перевіряється проти `<назва> | <видавець> | <шлях встановлення>`. Пакети, що збіглися, не потрапляють у payload. Типові сценарії для банку: BYOD-пристрої (особисте ПЗ співробітника поза обліком), тестові збірки вендорів, внутрішні інструменти, які обліковуються іншою системою.
 
 ### Linux і macOS
@@ -132,6 +146,15 @@ swinv\                              ← корінь репозиторію (п�
 │   ├── schema.sql                  ← таблиці, функції swinv_*, тригери аудиту, подання (ідемпотентно)
 │   ├── seed.sql                    ← 17 категорій з політиками, 13 вендорів з аліасами, 37 правил
 │   └── init\01-create-inventory-db.sh ← створення БД inventory при першому старті Postgres
+├── deploy\                         ← розгортання колектора на парк ПК
+│   ├── README.md                   ← GPO/Intune, Ansible, таблиця Windows↔Linux, токени, чого немає в прототипі
+│   ├── windows\Install-SWInvTask.ps1 ← Scheduled Task: щодня + RandomDelay, StartWhenAvailable, -RunAsSystem, -Uninstall
+│   └── ansible\
+│       ├── deploy-collector.yml    ← /opt/swinv + /etc/swinv/collector.env (0600) + systemd service і timer
+│       ├── uninstall-collector.yml ← зняти таймер, юніти й файли з хостів
+│       ├── inventory.example.ini   ← приклад інвентарю Ansible: група [workstations] + URL і токен
+│       ├── templates\              ← swinv-collector.service.j2, swinv-collector.timer.j2, collector.env.j2
+│       └── launchd\com.swinv.collector.plist ← macOS: launchd замість systemd
 ├── n8n\
 │   ├── build_workflows.py          ← генератор 5 воркфлоу (промпт, валідація, пороги — тут)
 │   ├── code\normalize.js           ← norm_v1: нормалізація і відбиток (вставляється в Code-ноду)

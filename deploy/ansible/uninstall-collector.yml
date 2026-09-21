@@ -1,0 +1,61 @@
+---
+# =====================================================================
+#  SWInv - remove the collector from the Linux fleet.
+#
+#    ansible-playbook -i inventory.ini uninstall-collector.yml
+#    ansible-playbook -i inventory.ini uninstall-collector.yml -e swinv_keep_snapshots=true
+#
+#  Stops and disables the timer, removes both units + /opt/swinv + /etc/swinv (the token!),
+#  and by default the collected JSON snapshots as well. Idempotent: running it twice is fine.
+# =====================================================================
+
+- name: Remove the SWInv collector
+  hosts: workstations
+  become: true
+  gather_facts: false
+
+  vars:
+    swinv_dir: /opt/swinv
+    swinv_conf_dir: /etc/swinv
+    swinv_state_dir: /var/lib/swinv
+    swinv_keep_snapshots: false
+
+  tasks:
+    - name: Stop and disable the timer
+      ansible.builtin.systemd:
+        name: swinv-collector.timer
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop a collection that may still be running
+      ansible.builtin.systemd:
+        name: swinv-collector.service
+        state: stopped
+      failed_when: false
+
+    - name: Remove the unit files
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}"
+        state: absent
+      loop:
+        - swinv-collector.timer
+        - swinv-collector.service
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Remove the collector and its configuration (including the token)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ swinv_dir }}"
+        - "{{ swinv_conf_dir }}"
+
+    - name: Remove the collected snapshots
+      ansible.builtin.file:
+        path: "{{ swinv_state_dir }}"
+        state: absent
+      when: not (swinv_keep_snapshots | bool)

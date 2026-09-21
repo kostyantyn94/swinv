@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SWInv collector on macOS - launchd equivalent of swinv-collector.timer.
+
+  Install (as root, per host or pushed by Jamf/Munki/Intune for macOS):
+      sudo install -m 0755 collect-inventory.sh /opt/swinv/collect-inventory.sh
+      sudo install -m 0600 com.swinv.collector.plist /Library/LaunchDaemons/com.swinv.collector.plist
+      sudo launchctl bootstrap system /Library/LaunchDaemons/com.swinv.collector.plist
+  Remove:
+      sudo launchctl bootout system/com.swinv.collector
+      sudo rm /Library/LaunchDaemons/com.swinv.collector.plist
+
+  Differences from systemd:
+    - no RandomizedDelaySec: the jitter is the `sleep $((RANDOM % 3600))` in the wrapper below;
+    - StartCalendarInterval already behaves like Persistent=true - a missed run fires after wake;
+    - the token sits in EnvironmentVariables, so the file must stay root-owned 0600.
+      As a LaunchDaemon this runs as root: machine-wide packages plus /Applications bundles;
+      per-user brew/npm/pip of a given user need a LaunchAgent in that user's session instead.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.swinv.collector</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>sleep $((RANDOM % 3600)); exec /opt/swinv/collect-inventory.sh --quiet --webhook-url "$SWINV_WEBHOOK_URL" --token "$SWINV_TOKEN" --out /var/lib/swinv/inventory-last.json</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SWINV_WEBHOOK_URL</key>
+        <string>http://n8n.corp.local:5678/webhook/inventory/ingest</string>
+        <key>SWINV_TOKEN</key>
+        <string>CHANGE-ME-WEBHOOK-TOKEN</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>20</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>AbandonProcessGroup</key>
+    <false/>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>StandardErrorPath</key>
+    <string>/var/log/swinv-collector.log</string>
+</dict>
+</plist>

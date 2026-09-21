@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+# SWInv collector schedule. Linux counterpart of the Windows Scheduled Task registered by
+# deploy/windows/Install-SWInvTask.ps1 (daily + random delay + "catch up if the machine was off").
+[Unit]
+Description=SWInv software inventory collection (daily)
+Documentation=https://github.com/kostyantyn94/swinv
+
+[Timer]
+# swinv_time: daily | 20:00 | Mon..Fri 20:00 | *-*-* 03:30:00
+OnCalendar={{ swinv_time }}
+# Jitter: without it 5000 hosts would hit the ingest webhook in the same second.
+RandomizedDelaySec={{ swinv_random_delay_sec }}
+# The machine was powered off at the scheduled time -> run as soon as it boots.
+Persistent=true
+AccuracySec=1m
+Unit=swinv-collector.service
+
+[Install]
+WantedBy=timers.target

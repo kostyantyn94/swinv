@@ -1,0 +1,164 @@
+---
+# =====================================================================
+#  SWInv - roll the Linux collector out to a fleet.
+#
+#    ansible-playbook -i inventory.ini deploy-collector.yml
+#    ansible-playbook -i inventory.ini deploy-collector.yml -e swinv_token=$INVENTORY_WEBHOOK_TOKEN
+#    ansible-playbook -i inventory.ini deploy-collector.yml --tags run-now   # + collect once right away
+#    ansible-playbook -i inventory.ini uninstall-collector.yml               # remove everything
+#
+#  What it puts on the host:
+#    /opt/swinv/collect-inventory.sh          the collector itself (0755, root)
+#    /opt/swinv/exclude.txt                   scope/privacy filter read by the collector
+#    /etc/swinv/collector.env                 webhook URL + token (0600, root) - the only secret
+#    /var/lib/swinv/                          last JSON snapshot written by the collector
+#    swinv-collector.service                  Type=oneshot, runs the collector once
+#    swinv-collector.timer                    daily + RandomizedDelaySec, Persistent=true
+#
+#  macOS uses launchd, not systemd: this play targets systemd hosts only
+#  (see launchd/com.swinv.collector.plist for the Mac equivalent).
+# =====================================================================
+
+- name: Deploy the SWInv collector as a systemd timer
+  hosts: workstations
+  become: true
+  gather_facts: true
+
+  vars:
+    swinv_dir: /opt/swinv
+    swinv_conf_dir: /etc/swinv
+    swinv_state_dir: /var/lib/swinv
+    swinv_out_file: "{{ swinv_state_dir }}/inventory-last.json"
+    # systemd OnCalendar expression: daily, 20:00, Mon..Fri 20:00, *-*-* 03:30:00 ...
+    swinv_time: daily
+    swinv_random_delay_sec: 3600
+    # empty = let the collector auto-detect dpkg/rpm/apk/pacman/snap/flatpak/brew/pip/npm/vscode
+    swinv_sources: ""
+
+  pre_tasks:
+    - name: Check the required variables are set
+      ansible.builtin.assert:
+        that:
+          - swinv_webhook_url is defined and swinv_webhook_url | length > 0
+          - swinv_token is defined and swinv_token | length > 0
+        fail_msg: >-
+          swinv_webhook_url and swinv_token must be set (inventory [workstations:vars],
+          ansible-vault, or -e swinv_token=...).
+        quiet: true
+
+    - name: Check this host is managed by systemd
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['service_mgr'] == 'systemd'
+        fail_msg: >-
+          {{ inventory_hostname }} is not a systemd host (service_mgr={{ ansible_facts['service_mgr'] }}).
+          macOS: use launchd/com.swinv.collector.plist instead.
+        quiet: true
+
+  tasks:
+    - name: Create the collector directory
+      ansible.builtin.file:
+        path: "{{ swinv_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Create the state directory for the JSON snapshot
+      ansible.builtin.file:
+        path: "{{ swinv_state_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: "{{ swinv_conf_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Copy the collector script
+      ansible.builtin.copy:
+        src: ../../collector/collect-inventory.sh
+        dest: "{{ swinv_dir }}/collect-inventory.sh"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Copy the exclude list (scope/privacy filter, read next to the script)
+      ansible.builtin.copy:
+        src: ../../collector/exclude.txt
+        dest: "{{ swinv_dir }}/exclude.txt"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Write the environment file with the webhook URL and token
+      ansible.builtin.template:
+        src: templates/collector.env.j2
+        dest: "{{ swinv_conf_dir }}/collector.env"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Restart the SWInv timer
+
+    - name: Install the systemd service unit
+      ansible.builtin.template:
+        src: templates/swinv-collector.service.j2
+        dest: /etc/systemd/system/swinv-collector.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Install the systemd timer unit
+      ansible.builtin.template:
+        src: templates/swinv-collector.timer.j2
+        dest: /etc/systemd/system/swinv-collector.timer
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart the SWInv timer
+
+    - name: Apply the unit changes before touching the timer
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start the timer
+      ansible.builtin.systemd:
+        name: swinv-collector.timer
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Read back the timer schedule
+      ansible.builtin.command: systemctl list-timers swinv-collector.timer --all --no-pager
+      register: swinv_timer_state
+      changed_when: false
+
+    - name: Show the timer schedule
+      ansible.builtin.debug:
+        var: swinv_timer_state.stdout_lines
+
+    # Optional first collection, so the host shows up on the dashboard immediately:
+    #   ansible-playbook -i inventory.ini deploy-collector.yml --tags run-now
+    - name: Collect once right now
+      ansible.builtin.systemd:
+        name: swinv-collector.service
+        state: started
+      tags: [run-now, never]
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart the SWInv timer
+      ansible.builtin.systemd:
+        name: swinv-collector.timer
+        state: restarted
